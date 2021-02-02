@@ -1046,11 +1046,21 @@ void Combine::run(TString hlfFile, const std::string &dataset, double &limit, do
               //genPdf->fitTo(*dobs, RooFit::Save(1), RooFit::Minimizer("Minuit2","minimize"), RooFit::Strategy(0), RooFit::Hesse(0), RooFit::Constrain(*(expectSignal_ ?mc:mc_bonly)->GetNuisanceParameters()));	
                 std::auto_ptr<RooAbsReal> nll(genPdf->createNLL(*dobs, RooFit::Constrain(*(expectSignal_ ||  setPhysicsModelParameterExpression_ != "" || noMCbonly_ ? mc:mc_bonly)->GetNuisanceParameters()), RooFit::Extended(genPdf->canBeExtended())));
                 CascadeMinimizer minim(*nll, CascadeMinimizer::Constrained);
+                std::cout << "+++++++++Frequentist Fit+++++++++" << std::endl;
                 minim.setStrategy(1);
                 minim.minimize();
+                std::cout << "Minimizer Status: " << minim.save()->status() << std::endl;
                 utils::setAllConstant(*mc->GetParametersOfInterest(), false); 
                 w->saveSnapshot("clean", utils::returnAllVars(w));
           }
+          // std::cout << "parameters: GlobalObservables";
+          // mc->GetGlobalObservables()->writeToStream(std::cout,false );
+          // std::cout << std::endl;
+          // std::cout << "parameters: ConditionalObservables ";
+          // mc->GetConditionalObservables ()->writeToStream(std::cout,false );
+          // std::cout << std::endl;
+          // std::cout << "END parameters" << std::endl;
+
           if (nuisancePdf.get()) systDs = nuisancePdf->generate(*mc->GetGlobalObservables(), nToys);
       } else {
           if (nuisancePdf.get()) systDs = nuisancePdf->generate(*nuisances, nToys);

@@ -180,8 +180,11 @@ bool GoodnessOfFit::runSaturatedModel(RooWorkspace *w, RooStats::ModelConfig *mc
     utils::setModelParameters(setParametersForFit_, w->allVars());
   }
   CascadeMinimizer minimn(*nominal_nll, CascadeMinimizer::Unconstrained);
- // minimn.setStrategy(minimizerStrategy_);
-  minimn.minimize(verbose-2);
+  std::cout << "Minimizing nominal nll:" << std::endl;
+// minimn.setStrategy(minimizerStrategy_);
+  bool status_2 = minimn.minimize(verbose-2);
+  //if(!status_2)return false;
+  // std::cout << "NOMINAL MINIMIZATION END (STATUS="<<minimn.save()->status() << ") return value:"<< (status_2 ? "true":"false") << std::endl;
   // This test is a special case where we are comparing the likelihoods of two
   // different models and so we can't re-zero the NLL with respect to the
   // initial parameters.
@@ -199,7 +202,9 @@ bool GoodnessOfFit::runSaturatedModel(RooWorkspace *w, RooStats::ModelConfig *mc
   }
   CascadeMinimizer minims(*saturated_nll, CascadeMinimizer::Unconstrained);
   //minims.setStrategy(minimizerStrategy_);
+  std::cout << "Minimizing nominal nll:" << std::endl;
   minims.minimize(verbose-2);
+  std::cout << "SATURATED MINIMIZATION END" << std::endl;
   if (dynamic_cast<cacheutils::CachingSimNLL*>(saturated_nll.get())) {
     static_cast<cacheutils::CachingSimNLL*>(saturated_nll.get())->clearConstantZeroPoint();
   }
@@ -208,13 +213,15 @@ bool GoodnessOfFit::runSaturatedModel(RooWorkspace *w, RooStats::ModelConfig *mc
     utils::setModelParameters(setParametersForEval_, w->allVars());
   }
   double nll_saturated = saturated_nll->getVal();
-
+  
   sentry.clear();
+  // std::cout << "nll_saturated (Status=" << minims.save()->status() <<"): "<< nll_saturated << " nll_nominal (Status=" << minimn.save()->status() <<"): " << nll_nominal << std::endl;
 
   saturated.reset();
   for (int i = 0, n = tempData_.size(); i < n; ++i) delete tempData_[i]; 
   tempData_.clear();
 
+  
   if (fabs(nll_nominal) > 1e10 || fabs(nll_saturated) > 1e10) return false;
   limit = 2*(nll_nominal-nll_saturated);
 
@@ -247,9 +254,12 @@ bool GoodnessOfFit::runKSandAD(RooWorkspace *w, RooStats::ModelConfig *mc_s, Roo
   std::auto_ptr<RooAbsReal> nll(pdf->createNLL(data, constrainCmdArg));
   CascadeMinimizer minim(*nll, CascadeMinimizer::Unconstrained);
   //minims.setStrategy(minimizerStrategy_);
-  minim.minimize(verbose-2);
+  // minim.minimize(verbose-2);
+  bool status_2 = minim.minimize(verbose-2);
+  if(!status_2)return false;
 
   sentry.clear();
+  std::cout << "MINIMIZATION END (STATUS="<<minim.save()->status() << ") return value:"<< (status_2 ? "true":"false") << std::endl;
 
   RooSimultaneous *sim = dynamic_cast<RooSimultaneous *>(obsOnlyPdf);
 
