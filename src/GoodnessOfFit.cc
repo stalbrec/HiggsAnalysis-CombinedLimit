@@ -127,6 +127,7 @@ bool GoodnessOfFit::runSaturatedModel(RooWorkspace *w, RooStats::ModelConfig *mc
   // case 1:
   RooSimultaneous *sim = dynamic_cast<RooSimultaneous *>(obsOnlyPdf);
   if (sim) {
+    std::cout << "AAA:SIM"<< std::endl;
       RooAbsCategoryLValue *cat = (RooAbsCategoryLValue *) sim->indexCat().Clone();
       std::auto_ptr<TList> datasets(data.split(*cat, true));
       int nbins = cat->numBins((const char *)0);
@@ -160,6 +161,7 @@ bool GoodnessOfFit::runSaturatedModel(RooWorkspace *w, RooStats::ModelConfig *mc
       }
       saturated.reset(satsim);
   } else {
+    std::cout << "AAA:NOTSIM"<< std::endl;
       RooAbsPdf *saturatedPdfi = makeSaturatedPdf(data);
       if (constraints.getSize() > 0) {
           RooArgList terms(constraints); terms.add(*saturatedPdfi);
@@ -183,8 +185,10 @@ bool GoodnessOfFit::runSaturatedModel(RooWorkspace *w, RooStats::ModelConfig *mc
   std::cout << "Minimizing nominal nll:" << std::endl;
 // minimn.setStrategy(minimizerStrategy_);
   bool status_2 = minimn.minimize(verbose-2);
+  double nominal_status = (double) minimn.save()->status();
+  std::cout << "NOMINAL MINIMIZATION END (STATUS="<<nominal_status << ")"<< std::endl;
+  
   //if(!status_2)return false;
-  // std::cout << "NOMINAL MINIMIZATION END (STATUS="<<minimn.save()->status() << ") return value:"<< (status_2 ? "true":"false") << std::endl;
   // This test is a special case where we are comparing the likelihoods of two
   // different models and so we can't re-zero the NLL with respect to the
   // initial parameters.
@@ -202,9 +206,13 @@ bool GoodnessOfFit::runSaturatedModel(RooWorkspace *w, RooStats::ModelConfig *mc
   }
   CascadeMinimizer minims(*saturated_nll, CascadeMinimizer::Unconstrained);
   //minims.setStrategy(minimizerStrategy_);
-  std::cout << "Minimizing nominal nll:" << std::endl;
+  std::cout << "Minimizing saturated nll:" << std::endl;
   minims.minimize(verbose-2);
-  std::cout << "SATURATED MINIMIZATION END" << std::endl;
+
+  // double saturated_status = (double) minims.save()->status();
+  limitErr = nominal_status;
+  // std::cout << "SATURATED MINIMIZATION END (STATUS="<<saturated_status << ")" << std::endl;
+
   if (dynamic_cast<cacheutils::CachingSimNLL*>(saturated_nll.get())) {
     static_cast<cacheutils::CachingSimNLL*>(saturated_nll.get())->clearConstantZeroPoint();
   }
@@ -256,8 +264,10 @@ bool GoodnessOfFit::runKSandAD(RooWorkspace *w, RooStats::ModelConfig *mc_s, Roo
   //minims.setStrategy(minimizerStrategy_);
   // minim.minimize(verbose-2);
   bool status_2 = minim.minimize(verbose-2);
-  if(!status_2)return false;
+  double status_minimizer = (double) minim.save()->status();
+  // if(!status_2)return false;
 
+    limitErr  = status_minimizer;
   sentry.clear();
   std::cout << "MINIMIZATION END (STATUS="<<minim.save()->status() << ") return value:"<< (status_2 ? "true":"false") << std::endl;
 
