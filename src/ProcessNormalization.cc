@@ -194,6 +194,16 @@ namespace {
 
 using RooFit::Detail::JSONNode;
 
+std::vector<double> readDoubleArray(JSONNode const &arr)
+{
+    std::vector<double> out;
+    out.reserve(arr.num_children());
+    for (const auto &c : arr.children()) {
+        out.push_back(c.val_double());
+    }
+    return out;
+}
+
 class ProcessNormalizationFactory : public RooFit::JSONIO::Importer {
     public:
         bool importArg(RooJSONFactoryWSTool *tool, const JSONNode &p) const override
@@ -205,12 +215,29 @@ class ProcessNormalizationFactory : public RooFit::JSONIO::Importer {
             }
             double nominal_value(p["nominalValue"].val_double());
             tool->wsEmplace<ProcessNormalization>(name, nominal_value);
-            RooArgList arg_list = tool->requestArgList<RooAbsReal>(p, "otherFactorList");
             RooWorkspace &ws = *tool->workspace();
             auto& process_normalization = static_cast<ProcessNormalization&>(*ws.function(name));
+
+            if (p.has_child("logKappa")) {
+                std::vector<double> logKappa = readDoubleArray(p["logKappa"]);
+                RooArgList thetaList = tool->requestArgList<RooAbsReal>(p, "thetaList");
+                for (std::size_t i = 0; i < logKappa.size(); ++i) {
+                    process_normalization.addLogNormal(std::exp(logKappa[i]), static_cast<RooAbsReal&>(thetaList[i]));
+                }
+            }
+            if (p.has_child("logAsymmKappaLo")) {
+                std::vector<double> lo = readDoubleArray(p["logAsymmKappaLo"]);
+                std::vector<double> hi = readDoubleArray(p["logAsymmKappaHi"]);
+                RooArgList asymmThetaList = tool->requestArgList<RooAbsReal>(p, "asymmThetaList");
+                for (std::size_t i = 0; i < lo.size(); ++i) {
+                    process_normalization.addAsymmLogNormal(std::exp(lo[i]), std::exp(hi[i]), static_cast<RooAbsReal&>(asymmThetaList[i]));
+                }
+            }
+
+            RooArgList arg_list = tool->requestArgList<RooAbsReal>(p, "otherFactorList");
             for (auto* val : static_range_cast<RooAbsReal*>(arg_list)) {
                 process_normalization.addOtherFactor(*val);
-            } 
+            }
             return true;
         }
 };
@@ -235,24 +262,15 @@ class ProcessNormalizationStreamer : public RooFit::JSONIO::Exporter {
 
             RooJSONFactoryWSTool::fillSeq(elem["thetaList"], norm->thetaList());
 
-            // Convert std::vector<std::pair<double, double>> to RooArgList
-            // try elem["logKappa"].appendChild() << val; instead
-            // Should be avoided with ROOT 6.32
-            RooArgList logAsymmKappaList;
+            std::vector<double> logAsymmKappaLo, logAsymmKappaHi;
+            logAsymmKappaLo.reserve(norm->logAsymmKappa().size());
+            logAsymmKappaHi.reserve(norm->logAsymmKappa().size());
             for (const auto& pair : norm->logAsymmKappa()) {
-                // Create RooRealVars for the pair
-                RooRealVar* firstVal = new RooRealVar("first", "First value", pair.first);
-                RooRealVar* secondVal = new RooRealVar("second", "Second value", pair.second);
-
-                // Create a sublist for the pair
-                RooArgList* pairList = new RooArgList();
-                pairList->add(*firstVal);
-                pairList->add(*secondVal);
-
-                // Add the sublist to the main list
-                logAsymmKappaList.add(*pairList);
+                logAsymmKappaLo.push_back(pair.first);
+                logAsymmKappaHi.push_back(pair.second);
             }
-            RooJSONFactoryWSTool::fillSeq(elem["logAsymmKappa"], logAsymmKappaList);
+            RooJSONFactoryWSTool::exportArray(logAsymmKappaLo.size(), logAsymmKappaLo.data(), elem["logAsymmKappaLo"]);
+            RooJSONFactoryWSTool::exportArray(logAsymmKappaHi.size(), logAsymmKappaHi.data(), elem["logAsymmKappaHi"]);
 
             RooJSONFactoryWSTool::fillSeq(elem["asymmThetaList"], norm->asymmThetaList());
 

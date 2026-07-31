@@ -458,11 +458,33 @@ void Combine::run(TString hlfFile, const std::string &dataset, double &limit, do
             if (extraConstrs.getSize() > 0) {
               if (verbose > 1) std::cout << "Attaching " << extraConstrs.getSize() << " constraint PDFs from JSON import." << std::endl;
               optpdf->addExtraConstraints(extraConstrs);
+
+              // The generic JSON importer's ModelConfig-building heuristic (importAnalysis in
+              // RooJSONFactoryWSTool.cxx) runs before these constraint pdfs are reattached above,
+              // so mc's NuisanceParameters/GlobalObservables are stale and mostly empty. Recompute
+              // them from the now-complete set of constraint pdfs.
+              RooArgSet newNuis(*mc->GetNuisanceParameters());
+              RooArgSet newGlobs(*mc->GetGlobalObservables());
+              for (RooAbsArg *carg : extraConstrs) {
+                RooArgSet cpars;
+                carg->getParameters(mc->GetObservables(), cpars);
+                for (RooAbsArg *p : cpars) {
+                  if (mc->GetParametersOfInterest()->find(*p)) continue;
+                  if (p->isConstant()) newGlobs.add(*p, true);
+                  else newNuis.add(*p, true);
+                }
+              }
+              mc->SetNuisanceParameters(newNuis);
+              mc->SetGlobalObservables(newGlobs);
             }
           }
           w->import(*optpdf);
           mc->SetPdf(*optpdf);
       }
+    }
+    if (verbose > 1) {
+      auto optpdf_ = dynamic_cast<RooSimultaneousOpt*>(mc->GetPdf());
+      if (optpdf_) std::cout << "RooSimOpt has (" << optpdf_->extraConstraints().size() << "/" << w->allPdfs().size() << ") of all pdfs present in ws added as extraConstraints" << std::endl;
     }
     if (expectSignalSet_ && POI->getSize() > 1 ) std::cerr << "ModelConfig '" << modelConfigName_ << "' defines more than one parameter of interest and you have set --expectSignal=" << expectSignal_ << ", which combine will likely interpret incorrectly. You should use --setParameters instead of --expectSignal." << std::endl;
     if (mc_bonly == 0 && !noMCbonly_) {

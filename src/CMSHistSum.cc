@@ -13,10 +13,15 @@
 #include "RooAbsData.h"
 #include "RooConstVar.h"
 #include "RooGaussian.h"
+#include "RooPoisson.h"
 #include "RooProduct.h"
+#include "RooAddition.h"
+#include "RooFormulaVar.h"
+#include "TMath.h"
 #include "vectorized.h"
 #include <charconv>
 #include <string>
+#include <algorithm>
 
 #define HFVERBOSE 0
 
@@ -810,6 +815,77 @@ static std::string cms_hist_sum_process_name(const CMSHistSum &hs, unsigned ip)
   return "proc_" + std::to_string(ip);
 }
 
+void exportOtherFactorModifiers(RooJSONFactoryWSTool *tool, JSONNode &mods, RooAbsReal *factor) {
+  if (auto *rcv = dynamic_cast<RooConstVar *>(factor)) {
+    auto &m = mods.append_child().set_map();
+    m["name"] << rcv->GetName();
+    m["parameter"] << rcv->getVal();
+    m["type"] << "normfactor";
+  } else if (auto *rrv = dynamic_cast<RooRealVar *>(factor)) {
+    auto &m = mods.append_child().set_map();
+    m["name"] << rrv->GetName();
+    m["parameter"] << rrv->GetName();
+    m["type"] << "normfactor";
+  } else if (auto *prod = dynamic_cast<RooProduct *>(factor)) {
+    for (auto *comp : prod->components()) {
+      exportOtherFactorModifiers(tool, mods, static_cast<RooAbsReal *>(comp));
+    }
+  } else {
+    // handling other (e.g. RooAddition)
+    auto &m = mods.append_child().set_map();
+    m["name"] << factor->GetName();
+    m["type"] << "custom";
+    tool->queueExport(*factor);
+  }
+}
+
+/// Build a standard-HistFactory gamma parameter + its Poisson or Gaussian
+/// constraint pdf for one per-process (sample,bin) bin-par slot (CMSHistSum
+/// bintype 2 or 3), and queue both for generic export (they round-trip as
+/// ordinary "poisson_dist"/"gaussian_dist" nodes, no custom code needed on
+/// reimport for the objects themselves). Returns the gamma parameter's name,
+/// for the "parameters" list, and writes the matching "constraints" entry
+/// (named "<baseName>_Constraint", for the caller's "constraints" list).
+/// nomVal/errVal are that one process's own nominal content / bin error at
+/// this bin -- exactly the same numbers already written to this sample's
+/// data.contents/data.errors, so nothing beyond what's already exported is
+/// needed to reproduce combine's own math exactly.
+std::string exportShapeSysGamma(RooJSONFactoryWSTool *tool, std::string const &baseName,
+                                unsigned bintype, double nomVal, double errVal)
+{
+  const std::string gammaName = baseName + "_gamma";
+  const std::string constrName = baseName + "_Constraint";
+  if (bintype == 3) {
+    // Gaussian per-process case: combine's internal x (mean 0, sigma 1) enters
+    // as x*errVal added to the process' own bin content -- equivalently, a
+    // standard mean-1 gamma with relative sigma errVal/nomVal.
+    double relErr = nomVal != 0. ? errVal / nomVal : 0.;
+    auto *gamma = new RooRealVar(gammaName.c_str(), "", 1.0, 0.0, 10.0);
+    auto *mean = new RooConstVar((gammaName + "_In").c_str(), "", 1.0);
+    auto *sigma = new RooConstVar((gammaName + "_sigma").c_str(), "", relErr);
+    auto *constr = new RooGaussian(constrName.c_str(), "", *gamma, *mean, *sigma);
+    tool->queueExportTemporary(mean);
+    tool->queueExportTemporary(sigma);
+    tool->queueExport(*gamma);
+    tool->queueExport(*constr);
+  } else {
+    // Poisson per-process case: reproduce CMSHistSum::setupBinPars()'s own
+    // recipe exactly (src/CMSHistSum.cc, low-stat branch) so the resulting
+    // gamma has identical range/meaning to what combine itself would build.
+    double n_p_r = errVal > 0. ? int(0.5 + ((nomVal * nomVal) / (errVal * errVal))) : 1.;
+    double sigmaCut = 7.;
+    double rmin = 0.5 * ROOT::Math::chisquared_quantile(ROOT::Math::normal_cdf_c(sigmaCut), n_p_r * 2.);
+    double rmax = 0.5 * ROOT::Math::chisquared_quantile(1. - ROOT::Math::normal_cdf_c(sigmaCut), n_p_r * 2. + 2.);
+    auto *gamma = new RooRealVar(gammaName.c_str(), "", n_p_r, rmin, rmax);
+    auto *nobs = new RooConstVar((gammaName + "_In").c_str(), "", n_p_r);
+    auto *constr = new RooPoisson(constrName.c_str(), "", *nobs, *gamma, true);
+    tool->queueExportTemporary(nobs);
+    tool->queueExport(*gamma);
+    tool->queueExport(*constr);
+  }
+  return gammaName;
+}
+
 bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const CMSHistSum *hs, JSONNode &elem){
 
     // if we have external morphs injected, you probably want to error out for now.
@@ -842,6 +918,61 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const CMSHistSum *hs, JSON
     const unsigned nProcs = hs->nProcs();
     const unsigned nMorphs = hs->nMorphs();
     const unsigned nBins  = hs->nBins();
+
+    const std::string distName = elem.has_child("name") ? elem["name"].val() : std::string(hs->GetName());
+
+    // Bin-by-bin (Barlow-Beeston-lite / MC-stat) classification, if this
+    // CMSHistSum was ever configured (via setupBinPars() on the regular
+    // ROOT/datacard path, or setBinPars() on a re-exported JSON-imported one).
+    // This is recorded using only the standard HistFactory "staterror"
+    // (combined, bintype 1) and "shapesys" (per-process, bintype 2/3) modifier
+    // vocabulary -- see the design notes in the accompanying plan for why the
+    // actual constraint math needs nothing beyond what's already exported
+    // (data.contents/data.errors) once the classification itself is known.
+    std::vector<bool> isCombinedBin(nBins, false);
+    bool anyCombinedBin = false;
+    if (hs->binParsConfigured()) {
+      for (unsigned j = 0; j < nBins; ++j) {
+        if (hs->nBinParSlots(j) == 1 && hs->binParType(j, 0) == 1) {
+          isCombinedBin[j] = true;
+          anyCombinedBin = true;
+        }
+      }
+    }
+    // Per-bin parameter names for the "staterror" modifier's explicit
+    // "parameters" list (empty string = not a combined-type bin).
+    std::vector<std::string> combinedParamNames(nBins);
+    if (anyCombinedBin) {
+      elem["staterror"].set_map()["constraint_type"] << "Gauss";
+      // Build the shared per-bin parameter + Gaussian(x,0,1) constraint once
+      // per bin here (channel-scoped, not per-sample). Built with combine's
+      // own native mean-0/unit-Gaussian convention (matching normsys/histosys
+      // parameters elsewhere in this same exporter) rather than the standard
+      // HistFactory mean-1 "gamma" convention: combine's analytic
+      // Barlow-Beeston profiling shortcut (CMSHistSum::runBarlowBeeston(),
+      // enabled by the MINIMIZER_analytic runtime-define) directly calls
+      // setVal()/setConstant() on this exact object via a raw RooRealVar*
+      // cast, so it must be a genuine, independently-settable RooRealVar --
+      // not a RooFormulaVar wrapping some other parameter -- or that cast is
+      // undefined behavior (confirmed: this crashed with a segfault in
+      // CMSHistSum::runBarlowBeeston() when it wasn't). Explicitly listing
+      // "parameters" (rather than relying on the standard default gamma
+      // naming/mean-1 convention) means any HS3-compliant reader uses this
+      // exact object too, not a reconstructed default one.
+      for (unsigned j = 0; j < nBins; ++j) {
+        if (!isCombinedBin[j]) continue;
+        const std::string xName = "stat_" + distName + "_bin" + std::to_string(j) + "_x";
+        auto *xvar = new RooRealVar(xName.c_str(), "", 0.0, -7.0, 7.0);
+        auto *mean0 = new RooConstVar((xName + "_In").c_str(), "", 0.0);
+        auto *sigma1 = new RooConstVar((xName + "_sigma").c_str(), "", 1.0);
+        auto *constr = new RooGaussian((xName + "_Constraint").c_str(), "", *xvar, *mean0, *sigma1);
+        tool->queueExportTemporary(mean0);
+        tool->queueExportTemporary(sigma1);
+        tool->queueExport(*xvar);
+        tool->queueExport(*constr);
+        combinedParamNames[j] = xName;
+      }
+    }
 
     for (unsigned ip = 0; ip < nProcs; ++ip) {
       const std::string sampleName = cms_hist_sum_process_name(*hs, ip);
@@ -891,7 +1022,12 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const CMSHistSum *hs, JSON
 	  data["lo"] << std::get<1>(v)/nom;
 	  data["hi"] << std::get<2>(v)/nom;
 	}
-	if(nom != 1.){
+
+  for (auto &of : pn->otherFactorList()) {
+    exportOtherFactorModifiers(tool, mods, static_cast<RooAbsReal *>(of));
+  }
+
+  if(nom != 1.){
 	  auto &m = mods.append_child().set_map();
 	  m["name"] << sampleName+"_norm_nominal";
 	  m["parameter"] << nom;
@@ -927,14 +1063,64 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const CMSHistSum *hs, JSON
         tool->queueExport(*par);
       }
 
-      // Staterror modifier (if errors were exported)
-      if (anyErr) {
+      // Combined-bin (bintype 1) treatment: standard "staterror" modifier,
+      // with an explicit "parameters" list (see the construction above for
+      // why these are combine-native mean-0 parameters, not standard mean-1
+      // gammas). Every sample gets this whenever any bin in the channel is
+      // combined-type, regardless of that sample's own error, matching
+      // combine's own valsum_/toterr_ aggregation which sums over every
+      // process unconditionally.
+      if (anyCombinedBin) {
         auto &m = mods.append_child().set_map();
-        m["name"] << "mcstat";
+        m["name"] << ("stat_" + distName);
         m["type"] << "staterror";
+        auto &pnode = m["parameters"].set_seq();
+        for (unsigned j = 0; j < nBins; ++j) {
+          if (combinedParamNames[j].empty()) pnode.append_child().set_null();
+          else pnode.append_child() << combinedParamNames[j];
+        }
+      }
+
+      // Per-process (bintype 2/3) treatment: standard "shapesys" modifier,
+      // scoped to this one sample, with an explicit, full-length (one entry
+      // per bin, null where not applicable) "parameters"/"constraints" pair.
+      if (hs->binParsConfigured()) {
+        bool anyPerProcess = false;
+        std::vector<std::string> gammaNames(nBins);
+        std::vector<std::string> constraintNames(nBins);
+        std::vector<double> vals(nBins, 0.0);
+        for (unsigned j = 0; j < nBins; ++j) {
+          if (isCombinedBin[j] || hs->nBinParSlots(j) != nProcs) continue;
+          unsigned btype = hs->binParType(j, ip);
+          if (btype != 2 && btype != 3) continue;
+          anyPerProcess = true;
+          const std::string baseName = distName + "_" + sampleName + "_bin" + std::to_string(j);
+          double nomVal = nomT.Values()[j];
+          double errVal = errs.Values()[j];
+          gammaNames[j] = exportShapeSysGamma(tool, baseName, btype, nomVal, errVal);
+          constraintNames[j] = baseName + "_Constraint";
+          vals[j] = nomVal != 0. ? errVal / nomVal : 0.;
+        }
+        if (anyPerProcess) {
+          auto &m = mods.append_child().set_map();
+          m["name"] << (sampleName + "_ShapeSys");
+          m["type"] << "shapesys";
+          auto &pnode = m["parameters"].set_seq();
+          auto &cnode = m["constraints"].set_seq();
+          for (unsigned j = 0; j < nBins; ++j) {
+            if (gammaNames[j].empty()) {
+              pnode.append_child().set_null();
+              cnode.append_child().set_null();
+            } else {
+              pnode.append_child() << gammaNames[j];
+              cnode.append_child() << constraintNames[j];
+            }
+          }
+          RooJSONFactoryWSTool::exportArray(nBins, vals.data(), m["data"].set_map()["vals"]);
+        }
       }
     }
-    
+
     return true;
 }
 
@@ -1208,7 +1394,28 @@ public:
          auto *one = new RooConstVar("ONE", "ONE", 1.0);
          tool->workspace()->import(*one, RooFit::RecycleConflictNodes());
          ONE = dynamic_cast<RooAbsReal *>(tool->workspace()->arg("ONE"));
-      }      
+      }
+
+      // Bin-by-bin (Barlow-Beeston-lite / MC-stat) bin-pars are reconstructed
+      // directly from the standard "staterror"/"shapesys" modifiers below (see
+      // scripts/plan notes) rather than by re-running setupBinPars()'s own
+      // classification algorithm on data alone -- the classification itself
+      // (which bin gets which treatment) can only come from which modifier is
+      // present, since it depends on datacard-only configuration
+      // (autoMCStats threshold / includeSignal) that never round-trips.
+      const unsigned nProcsTotal = static_cast<unsigned>(elem["samples"].num_children());
+      const unsigned nBinsX = static_cast<unsigned>(x->numBins());
+      std::vector<std::vector<double>> allContents(nProcsTotal);
+      std::vector<std::vector<double>> allErrors(nProcsTotal);
+      // Per-bin parameter name referenced by the "staterror" modifier's
+      // explicit "parameters" list (empty = not a combined-type bin); set
+      // (redundantly, but consistently) by every sample carrying the modifier.
+      std::vector<std::string> combinedParamNames(nBinsX);
+      // per (bin,proc): 0 = none, 2 = poisson, 3 = gaussian (bintype convention,
+      // see CMSHistSum::binParType())
+      std::vector<std::vector<unsigned>> perProcType(nBinsX, std::vector<unsigned>(nProcsTotal, 0));
+      std::vector<std::vector<RooAbsReal *>> perProcXEquiv(nBinsX, std::vector<RooAbsReal *>(nProcsTotal, nullptr));
+      unsigned ip = 0; // running sample/process index, matches export-time ordering
 
       for(const auto&s:elem["samples"].children()){
 	const std::string sampleName = s["name"].val();
@@ -1229,6 +1436,8 @@ public:
          } else {
 	   errors.assign(x->numBins(), 0.0);
          }
+         allContents[ip] = contents;
+         allErrors[ip] = errors;
 
          // Build a TH1D with that binning (uniform, defined by axis min/max/nbins)
          const std::string hname = distName + "_" + sampleName + "_nominal";
@@ -1277,8 +1486,97 @@ public:
 		  }
 		  coeffFactors.add(*obj);
                } else if (mtype == "staterror") {
-                  // Already encoded via per-bin errors; CMSHistSum will handle BBB if configured.
-                  continue;
+                  // Channel-scoped: the explicit "parameters" list names the
+                  // shared, already-standalone-exported per-bin parameter
+                  // (combine-native mean-0, not a standard mean-1 gamma -- see
+                  // the exporter for why). Recorded once per bin (redundantly
+                  // but consistently across every sample carrying this
+                  // modifier); does not itself add a coefficient factor.
+                  if (m.has_child("parameters")) {
+                     unsigned jbin = 0;
+                     for (const auto &pentry : m["parameters"].children()) {
+                        if (jbin >= nBinsX) break;
+                        if (!pentry.is_null() && combinedParamNames[jbin].empty())
+                           combinedParamNames[jbin] = pentry.val();
+                        ++jbin;
+                     }
+                  }
+	       } else if (mtype == "shapesys") {
+                  // Sample-scoped per-bin bin-par (CMSHistSum bintype 2/3): "parameters"
+                  // and "constraints" are full-length (one entry per bin, null where
+                  // not applicable) lists referencing already-imported gamma
+                  // parameters and their Poisson/Gaussian constraint pdfs.
+                  if (!m.has_child("parameters") || !m.has_child("constraints"))
+                     throw std::runtime_error("CMSHistSum importer: shapesys modifier '" + mname +
+                                              "' on sample '" + sampleName + "' missing parameters/constraints");
+                  auto const &pnode = m["parameters"];
+                  auto const &cnode = m["constraints"];
+                  unsigned jbin = 0;
+                  auto pit = pnode.children().begin();
+                  auto cit = cnode.children().begin();
+                  for (; pit != pnode.children().end() && cit != cnode.children().end() && jbin < nBinsX;
+                       ++pit, ++cit, ++jbin) {
+                     if ((*pit).is_null() || (*cit).is_null())
+                        continue;
+                     std::string gammaName = (*pit).val();
+                     std::string constrName = (*cit).val();
+                     // Use request<T>() rather than a raw workspace lookup: the
+                     // constraint pdf is exported into the same "distributions"
+                     // array as this histfactory_dist node itself, positioned
+                     // after it (queueExport()'d from inside this same export
+                     // call), so it is not yet imported when the "distributions"
+                     // array is processed sequentially. request<T>() resolves
+                     // this by importing it on demand if not already present
+                     // (the same mechanism the standard HistFactory JSON code
+                     // uses for its own "constraint_name" references).
+                     auto *gamma = tool->request<RooRealVar>(gammaName, sampleName);
+                     auto *constr = tool->request<RooAbsPdf>(constrName, sampleName);
+                     if (!gamma || !constr)
+                        throw std::runtime_error("CMSHistSum importer: shapesys parameter '" + gammaName +
+                                                 "' or constraint '" + constrName + "' on sample '" + sampleName +
+                                                 "' not yet imported, there seems to be a priority/ordering issue");
+                     double nomVal = contents[jbin];
+                     double errVal = errors[jbin];
+                     RooAbsReal *xEquiv = nullptr;
+                     unsigned btype;
+                     if (dynamic_cast<RooPoisson *>(constr)) {
+                        btype = 2;
+                        // combine's own convention: the CMSHistSum binpar slot IS the
+                        // mean-1 ratio gamma/n_p_r directly (matching what
+                        // setupBinPars() itself builds for this case). n_p_r is
+                        // recomputed deterministically from this sample's own
+                        // data.contents/data.errors -- the exact same formula used
+                        // when this gamma was originally sized on export -- rather
+                        // than trusting gamma's current (possibly already-fitted)
+                        // value.
+                        double n_p_r = errVal > 0. ? int(0.5 + ((nomVal * nomVal) / (errVal * errVal))) : 1.;
+                        const std::string ratioName = gammaName + "_ratio";
+                        auto *ratioConst = new RooConstVar((ratioName + "_const").c_str(), "", 1. / n_p_r);
+                        auto *ratio = new RooProduct(ratioName.c_str(), "", RooArgList(*gamma, *ratioConst));
+                        tool->workspace()->import(*ratio, RooFit::RecycleConflictNodes());
+                        xEquiv = dynamic_cast<RooAbsReal *>(tool->workspace()->function(ratioName.c_str()));
+                     } else {
+                        btype = 3;
+                        double relErr = nomVal != 0. ? errVal / nomVal : 0.;
+                        const std::string xName = gammaName + "_x";
+                        // Pass relErr as a RooConstVar argument rather than embedding it in
+                        // the formula string via std::to_string(): the latter uses fixed
+                        // 6-decimal formatting and silently rounds any relErr smaller than
+                        // ~1e-6 to the literal text "0.000000", producing a division by
+                        // zero baked into the formula.
+                        auto *relErrConst = new RooConstVar((xName + "_relErr").c_str(), "", relErr);
+                        RooFormulaVar *xvar;
+                        if (relErr != 0.) {
+                           xvar = new RooFormulaVar(xName.c_str(), "(@0-1)/@1", RooArgList(*gamma, *relErrConst));
+                        } else {
+                           xvar = new RooFormulaVar(xName.c_str(), "0*@0", RooArgList(*gamma));
+                        }
+                        tool->workspace()->import(*xvar, RooFit::RecycleConflictNodes());
+                        xEquiv = dynamic_cast<RooAbsReal *>(tool->workspace()->function(xName.c_str()));
+                     }
+                     perProcType[jbin][ip] = btype;
+                     perProcXEquiv[jbin][ip] = xEquiv;
+                  }
 	       } else if (mtype == "normsys"){
 		 auto *parameter = m.find("parameter");
 		 std::string parname(parameter ? parameter->val() : "alpha_" + mname);
@@ -1329,7 +1627,7 @@ public:
 	   auto* pn = new ProcessNormalization(pnName.c_str(), pnName.c_str(), *norm);
 	   for(size_t i=0; i<overall_pars.size(); ++i){
 	     auto par = dynamic_cast<RooAbsReal*>(&(overall_pars[i]));
-	     if(approxSymmetricKappas(overall_vals[1].first,overall_vals[i].second)){
+	     if(approxSymmetricKappas(overall_vals[i].first,overall_vals[i].second)){
 	       pn->addLogNormal(overall_vals[i].first * norm_nom, *par);
 	     } else {
 	       pn->addAsymmLogNormal(overall_vals[i].first * norm_nom, overall_vals[i].second * norm_nom, *par);
@@ -1350,11 +1648,60 @@ public:
                throw std::runtime_error("CMSHistSum importer: failed to import coefficient product '" + coeffName + "'");
          }
          coeffs.add(*coeff);
+         ++ip;
+      }
+
+      // Finish assembling bin-pars: bintypes defaults to "untouched" (size-1,
+      // value 0) per bin; per-process bins (any shapesys entry recorded above)
+      // override that to a full nProcsTotal-sized vector; remaining bins fall
+      // back to the shared "staterror" channel-level treatment if applicable.
+      std::vector<std::vector<unsigned>> bintypes(nBinsX, std::vector<unsigned>(1, 0));
+      std::vector<RooAbsReal *> combinedXEquiv(nBinsX, nullptr);
+      for (unsigned j = 0; j < nBinsX; ++j) {
+         bool isPerProcess = std::any_of(perProcType[j].begin(), perProcType[j].end(), [](unsigned t) { return t != 0; });
+         if (isPerProcess) {
+            bintypes[j] = perProcType[j];
+            continue;
+         }
+         if (combinedParamNames[j].empty()) continue; // bintype 0: untouched
+         // Fed directly into binpars_, no transform: this parameter was
+         // exported with combine's own native mean-0/unit-Gaussian
+         // convention specifically so it can be used as-is here (see the
+         // exporter for why a derived RooFormulaVar can't be used instead --
+         // CMSHistSum::runBarlowBeeston()'s analytic profiling shortcut needs
+         // a genuine, independently-settable RooRealVar).
+         auto *xvar = tool->request<RooRealVar>(combinedParamNames[j], distName);
+         if (!xvar)
+            throw std::runtime_error("CMSHistSum importer: staterror parameter '" + combinedParamNames[j] +
+                                     "' not yet imported, there seems to be a priority/ordering issue");
+         combinedXEquiv[j] = xvar;
+         bintypes[j][0] = 1;
+      }
+
+      // Assemble the final binpars RooArgList in bin-major/slot-minor order,
+      // only for slots with type in [1,4) -- matching what
+      // CMSHistSum::initialize() expects when consuming bintypes_/binpars_.
+      RooArgList binpars;
+      for (unsigned j = 0; j < nBinsX; ++j) {
+         if (bintypes[j].size() == 1) {
+            if (bintypes[j][0] == 1) binpars.add(*combinedXEquiv[j]);
+         } else {
+            for (unsigned k = 0; k < nProcsTotal; ++k) {
+               unsigned t = bintypes[j][k];
+               if (t == 2 || t == 3) binpars.add(*perProcXEquiv[j][k]);
+            }
+         }
       }
 
       // Construct CMSHistSum
       const std::string sumName = distName + "_cmshistsum";
       auto *sum = new CMSHistSum(sumName.c_str(), sumName.c_str(), *x, funcs, coeffs);
+      // setBinPars() must run on this not-yet-imported object: bintypes_/binpars_
+      // are persisted members, correctly copied by CMSHistSum's copy constructor
+      // (unlike the transient vfuncstmp_ that setupBinPars() itself relies on,
+      // which is why that method can't be used post-import), so this is
+      // naturally clone-safe.
+      sum->setBinPars(bintypes, binpars);
       tool->workspace()->import(*sum, RooFit::RecycleConflictNodes());
       sum = dynamic_cast<CMSHistSum *>(tool->workspace()->function(sumName.c_str()));
       if (!sum)

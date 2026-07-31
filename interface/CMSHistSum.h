@@ -185,7 +185,35 @@ public:
     return vsmooth_par_.at(static_cast<std::size_t>(iproc));
   }
 
-  
+  /// True if bin-pars have been configured on this object, either via
+  /// setupBinPars() (regular ROOT/datacard path) or setBinPars() (JSON import
+  /// path) -- even if zero bin-par parameters were actually created (e.g.
+  /// because every bin had zero error).
+  bool binParsConfigured() const { return !bintypes_.empty(); }
+
+  /// Number of classification slots for a bin: 1 for the "combined" case
+  /// (single shared bin-par across all processes), nProcs() for the
+  /// "per-process" case.
+  unsigned nBinParSlots(unsigned ibin) const { return bintypes_.at(ibin).size(); }
+
+  /// Classification for a given bin/slot: 0 = untouched, 1 = combined Gaussian
+  /// (only ever slot 0 of a size-1 vector), 2 = per-process Poisson,
+  /// 3 = per-process Gaussian, 4 = ignored (zero/negative error).
+  unsigned binParType(unsigned ibin, unsigned islot) const { return bintypes_.at(ibin).at(islot); }
+
+  /// Directly configure bin-pars from an already-known classification, bypassing
+  /// setupBinPars()'s classification algorithm entirely. Used by the JSON
+  /// importer, which derives bintypes/binpars from the standard HS3
+  /// staterror/shapesys modifiers rather than recomputing them from per-bin
+  /// errors. binpars must be populated bin-major/slot-minor, only for slots
+  /// with type in [1,4), matching what initialize() expects.
+  void setBinPars(std::vector<std::vector<unsigned>> bintypes, RooArgList const &binpars) {
+    if (bintypes_.size()) return; // already configured
+    bintypes_ = std::move(bintypes);
+    binpars_.add(binpars);
+  }
+
+
 protected:
   RooRealProxy x_;
 
