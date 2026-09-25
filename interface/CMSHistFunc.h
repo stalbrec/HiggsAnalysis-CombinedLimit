@@ -143,6 +143,15 @@ class CMSHistFunc : public RooAbsReal {
   inline FastTemplate const& errors() const { return binerrors_; }
   inline FastHisto const& cache() const { return rebin_ ? rebin_cache_ : cache_; }
 
+  //! Parameters driving vertical (shape) morphs, one per systematic, in the same order used
+  //! internally by setShape()/getIdx(). Exposed (alongside hmorphs() and updateCache(), both
+  //! already public) so HS3 export can numerically probe the shape at fixed parameter points
+  //! (nominal, +-1 sigma) without needing to understand the horizontal/vertical storage layout.
+  inline RooArgList const& vmorphs() const { return vmorphs_; }
+  //! Horizontal (mass-point) morph parameters. HS3 export declines when this is non-empty --
+  //! not exercised by ordinary `shape` datacard lines, only by dedicated mass-interpolation models.
+  inline RooArgList const& hmorphs() const { return hmorphs_; }
+
   CMSHistFuncWrapper const* wrapper() const;
 
   RooAbsReal const& getXVar() const;

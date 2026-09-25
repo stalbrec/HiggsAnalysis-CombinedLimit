@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <map>
+#include <RVersion.h>
 #include <RooAbsPdf.h>
 #include <RooAddPdf.h>
 #include <RooRealSumPdf.h>
@@ -185,7 +186,9 @@ class CachingSimNLL  : public RooAbsReal {
         void setMaskNonDiscreteChannels(bool mask) ;
         friend class CachingAddNLL;
         // trap this call, since we don't care about propagating it to the sub-components
+#if ROOT_VERSION_CODE < ROOT_VERSION(6,41,1)
         void constOptimizeTestStatistic(ConstOpCode opcode, Bool_t doAlsoTrackingOpt=kTRUE) override { }
+#endif
     private:
         void setup_();
         RooSimultaneous   *pdfOriginal_;

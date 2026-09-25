@@ -325,6 +325,8 @@ public:
 
 #if ROOT_VERSION_CODE>=ROOT_VERSION(5,34,15)
   void fixCache() { _cacheMgr.setClearOnRedirect(kFALSE) ; }
+#endif
+#if ROOT_VERSION_CODE>=ROOT_VERSION(5,34,15) && ROOT_VERSION_CODE < ROOT_VERSION(6,41,1)
   CacheMode canNodeBeCached() const override { return RooAbsArg::NotAdvised ; } ;
 #endif
   
