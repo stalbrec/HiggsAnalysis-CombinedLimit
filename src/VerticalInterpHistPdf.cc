@@ -947,6 +947,8 @@ void FastVerticalInterpHistPdf2::initComponent(int dim, TObject *thi, TObject *t
     TH1 *histLo = dynamic_cast<TH1*>(tlo);
     if (histHi && histLo) {
         hi = *histHi; lo = *histLo; 
+        if (_inputMorphs.size() < _morphs.size()) _inputMorphs.resize(_morphs.size());
+        _inputMorphs[dim] = {hi, lo};
     } else {
         RooAbsPdf *pdfHi = dynamic_cast<RooAbsPdf *>(thi);
         RooAbsPdf *pdfLo = dynamic_cast<RooAbsPdf *>(tlo);
@@ -1591,7 +1593,15 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const RooAddPdf *sum, JSON
             if (fvih->smoothAlgo() < 0) {
                 RooJSONFactoryWSTool::error("smoothalog <0 not implemented yet.");
             }
-            for (int ib = 0; ib<nBins; ++ib){
+            // Built from histograms in this process (e.g. by the importer below): write the input
+            // templates back unchanged. Reimporting them normalizes them the same way again.
+            auto const &inputMorphs = fvih->inputMorphs();
+            const bool haveInput = icoeff < inputMorphs.size() && inputMorphs[icoeff].first.fullsize() == unsigned(nBins);
+            for (int ib = 0; haveInput && ib<nBins; ++ib){
+                hi[ib] = inputMorphs[icoeff].first[ib];
+                lo[ib] = inputMorphs[icoeff].second[ib];
+            }
+            for (int ib = 0; !haveInput && ib<nBins; ++ib){
                 hi[ib] = (morph_sum[ib]+morph_diff[ib])/2.;
                 lo[ib] = (morph_sum[ib]-morph_diff[ib])/2.;
 
@@ -1829,20 +1839,13 @@ public:
             } // end modifiers safe
             std::string summand_name = distName + "_" +sampleName; 
             FastVerticalInterpHistPdf2 * fvih = new FastVerticalInterpHistPdf2(summand_name.c_str(),summand_name.c_str(), *x, histosys_funcs, histosys_coeff);
+            fvih->setStringAttribute("combine.process", sampleName.c_str());
             summand_list.add(*fvih);
 
-            // A RooConstVar (not a RooRealVar) so that re-exporting this sample writes the yield back
-            // out as a numeric "normfactor" again -- exportOtherFactorModifiers only inlines the
-            // value for constants, so a RooRealVar here would round-trip as a named parameter and
-            // lose the yield to getOrMakeParameter's default of 1.
-            RooAbsReal *norm = ONE;
-            if(norm_nom != 1.){
-                const std::string normName = distName + "_" + sampleName + "_norm_nominal";
-                norm = new RooConstVar(normName.c_str(), normName.c_str(), norm_nom);
-            }
-
+            // The yield is the ProcessNormalization's own nominal value, as text2workspace.py builds
+            // it; the exporter writes that back as the "<sample>_norm_nominal" normfactor.
             const std::string pnName = distName + "_processnorm_" +sampleName;
-            auto * pn = new ProcessNormalization(pnName.c_str(), pnName.c_str(), *norm);
+            auto * pn = new ProcessNormalization(pnName.c_str(), pnName.c_str(), norm_nom);
 
             // A normsys whose parameter also carries a histosys on this sample is the yield half of
             // a `shape` systematic: rebuild ShapeTools.py's standalone AsymPow for it and multiply it
