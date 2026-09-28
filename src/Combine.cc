@@ -463,6 +463,9 @@ void Combine::run(TString hlfFile, const std::string &dataset, double &limit, do
               if (verbose > 1) std::cout << "Attaching " << extraConstrs.getSize() << " constraint PDFs from JSON import." << std::endl;
               optpdf->addExtraConstraints(extraConstrs);
             }
+            if (!optpdf->importChannelMasksJSON(fileToLoad.Data(), *w)) {
+              throw std::invalid_argument("Invalid misc.CMS.channel_masks in " + std::string(fileToLoad.Data()));
+            }
           }
           w->import(*optpdf);
           mc->SetPdf(*optpdf);

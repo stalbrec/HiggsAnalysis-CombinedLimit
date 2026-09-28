@@ -6,6 +6,7 @@
 #include "RooAbsReal.h"
 #include "RooArgSet.h"
 #include "RooListProxy.h"
+#include <cmath>
 #include "RooRealProxy.h"
 #include "Rtypes.h"
 #include "TH1F.h"
@@ -135,31 +136,44 @@ public:
     return retval;
   }
 
-  /// Stored up-template for a given vmorph
+  /// Template at morph parameter +1 (up) or -1 (down) for a given vmorph: the input template
+  /// if this object was constructed in this session (inputStorage_), else evaluated from the
+  /// stored sum/diff exactly as updateCache() does at theta = +-1 (smoothStepFunc(+-1) = +-1).
+  FastTemplate morphTemplate(unsigned iproc, unsigned imorph, bool up, bool density=true) const
+  {
+    const int field = morphCode(iproc, imorph) + (up ? 1 : 0);
+    FastTemplate retval(nominalTemplate(iproc));
+    if (!inputStorage_.empty()) {
+      retval = inputStorage_.at(field);
+    } else {
+      // storage_[code + 0] = hi' + lo' (sum), storage_[code + 1] = hi' - lo' (diff)
+      FastTemplate const &sum = storage_.at(morphCode(iproc, imorph) + 0);
+      FastTemplate const &diff = storage_.at(morphCode(iproc, imorph) + 1);
+      const double x = up ? 0.5 : -0.5, y = up ? 1.0 : -1.0;
+      if (vtype_.at(iproc) == CMSHistFunc::VerticalSetting::LogQuadLinear) {
+        for (size_t i = 0; i < nBins(); ++i) retval[i] *= std::exp(x * (diff[i] + y * sum[i]));
+      } else {
+        retval.Meld(diff, sum, x, y);
+      }
+    }
+    if(!density){
+      for(size_t i=0; i<nBins(); ++i){
+	retval[i] *= binWidth(i);
+      }
+    }
+    return retval;
+  }
   FastTemplate upTemplate(unsigned iproc, unsigned imorph, bool density=true) const
   {
-    FastTemplate retval(nominalTemplate(iproc));
-    retval.Meld(storage_.at(morphCode(iproc,imorph) + 1), storage_.at(morphCode(iproc,imorph) + 0), 0.5, 0);
-    if(!density){
-      for(size_t i=0; i<nBins(); ++i){
-	retval[i] *= binWidth(i);
-      }
-    }    
-    return retval;
+    return morphTemplate(iproc, imorph, true, density);
   }
-
-  /// Stored down-template for a given vmorph
   FastTemplate downTemplate(unsigned iproc, unsigned imorph, bool density=true) const
   {
-    FastTemplate retval(nominalTemplate(iproc));    
-    retval.Meld(storage_.at(morphCode(iproc,imorph) + 1), storage_.at(morphCode(iproc,imorph) + 0), -0.5, 0);
-    if(!density){
-      for(size_t i=0; i<nBins(); ++i){
-	retval[i] *= binWidth(i);
-      }
-    }    
-    return retval;
+    return morphTemplate(iproc, imorph, false, density);
   }
+
+  /// True if setupBinPars created Barlow-Beeston-lite parameters (autoMCStats threshold >= 0)
+  bool hasBinPars() const { return binpars_.getSize() > 0; }
 
   /// Per-bin MC stat errors for a process
   FastTemplate binErrors(unsigned iproc, bool density=true) const
@@ -197,6 +211,7 @@ protected:
   int n_morphs_;
 
   std::vector<FastTemplate> storage_;  // All nominal and vmorph templates
+  std::vector<FastTemplate> inputStorage_; //! storage_ before the sum/diff conversion (HS3 export), not persisted
   std::vector<int> process_fields_; // Indicies for process templates in storage_
   std::vector<int> vmorph_fields_; // Indicies for vmorph templates in storage_
 

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "../interface/CMSHistSum.h"
 #include "../interface/CMSHistFuncWrapper.h"
 #include "../interface/ProcessNormalization.h"
@@ -123,6 +124,10 @@ CMSHistSum::CMSHistSum(const char* name,
 #endif
   }
 
+  // Keep the input templates for the HS3 export: the sum/diff conversion below does not
+  // round-trip exactly. Transient, so workspaces read from file use the stored sum/diff.
+  inputStorage_ = storage_;
+
   // Next populate the storage_ index positions for fast lookup later
   process_fields_ = std::vector<int>(n_procs_, 0);
   vmorph_fields_ = std::vector<int>(n_procs_ * n_morphs_, -1);
@@ -185,6 +190,7 @@ CMSHistSum::CMSHistSum(
       n_procs_(other.n_procs_),
       n_morphs_(other.n_morphs_),
       storage_(other.storage_),
+      inputStorage_(other.inputStorage_),
       process_fields_(other.process_fields_),
       vmorph_fields_(other.vmorph_fields_),
       binerrors_(other.binerrors_),
@@ -870,8 +876,10 @@ void exportCoeffModifier(RooJSONFactoryWSTool* tool, JSONNode& mods, RooAbsArg c
       m["parameter"] << std::get<0>(v);
       m["type"] << "normsys";
       auto& data = m["data"].set_map();
-      data["lo"] << std::get<1>(v) / nom;
-      data["hi"] << std::get<2>(v) / nom;
+      // sigmaVariationsAll() already gives the relative factors at -1/+1 sigma (the nominal is
+      // its own normfactor below), which is what normsys lo/hi mean.
+      data["lo"] << std::get<1>(v);
+      data["hi"] << std::get<2>(v);
     }
 
     for (auto& of : pn->otherFactorList()) {
@@ -993,8 +1001,9 @@ bool tryExportHistFactory(RooJSONFactoryWSTool* tool, const CMSHistSum* hs, JSON
         tool->queueExport(*par);
       }
 
-      // Staterror modifier (if errors were exported)
-      if (anyErr) {
+      // Staterror modifier only if there are Barlow-Beeston-lite parameters: with autoMCStats -1
+      // (no bin parameters) the model has no statistical terms, and a staterror would add them.
+      if (anyErr && hs->hasBinPars()) {
         auto &m = mods.append_child().set_map();
         m["name"] << "mcstat";
         m["type"] << "staterror";
@@ -1151,8 +1160,15 @@ bool tryExportHistFactoryFromPropagator(RooJSONFactoryWSTool* tool, const CMSHis
     auto* coeff = (ip < static_cast<unsigned>(coeffs.getSize())) ? coeffs.at(ip) : nullptr;
     exportCoeffModifier(tool, mods, coeff, sampleName);
 
-    // Vertical morphs -> histosys modifiers, probed numerically at theta = +-1.
-    for (unsigned iv = 0; iv < nMorphs; ++iv) {
+    // Vertical morphs -> histosys modifiers, probed numerically at theta = +-1. Written in
+    // CMSHistSum's canonical order (its std::map of morph names, i.e. sorted by name), so the
+    // CMSHistSum the importer builds exports them in the same order.
+    std::vector<unsigned> morphOrder(nMorphs);
+    for (unsigned iv = 0; iv < nMorphs; ++iv) morphOrder[iv] = iv;
+    std::sort(morphOrder.begin(), morphOrder.end(), [&vm](unsigned a, unsigned b) {
+      return std::string(vm.at(a)->GetName()) < std::string(vm.at(b)->GetName());
+    });
+    for (unsigned iv : morphOrder) {
       RooAbsArg const *par = vm.at(iv);
       if (!par) continue;
 
@@ -1179,10 +1195,9 @@ bool tryExportHistFactoryFromPropagator(RooJSONFactoryWSTool* tool, const CMSHis
       tool->queueExport(*par);
     }
 
-    // Staterror modifier (if errors were exported) -- same bare HistFactory-style marker
-    // tryExportHistFactory uses; the importer reconstructs the shared Barlow-Beeston gammas from
-    // each sample's own data.errors, which is exactly what the spec's staterror already means.
-    if (anyErr) {
+    // Staterror modifier (if errors were exported and there are bin parameters) -- same bare
+    // HistFactory-style marker tryExportHistFactory uses.
+    if (anyErr && prop->hasBinPars()) {
       auto &m = mods.append_child().set_map();
       m["name"] << "mcstat";
       m["type"] << "staterror";
@@ -1484,6 +1499,9 @@ inline bool isSingleBinCountingDist(RooFit::Detail::JSONNode const &elem)
         } else {
             auto const *nb = ax.find("nbins");
             if (!nb || nb->val_int() != 1) return false;
+            // the count axis n_obs_bin<b> is unbounded above; a 1-bin shape channel is not
+            auto const *mx = ax.find("max");
+            if (mx && !mx->is_null()) return false;
         }
     }
 
@@ -1572,7 +1590,6 @@ public:
 	 const std::string funcName = distName + "_histosys_" + sampleName;
          auto *func = new CMSHistFunc(funcName.c_str(), funcName.c_str(), *x, *h);
 
-         RooArgList coeffFactors;
 	 struct VMorph {
 	   FastHisto low;
 	   FastHisto high;
@@ -1580,11 +1597,25 @@ public:
 	 };
 	 RooArgList vmorph_pars;
 	 std::vector<VMorph> vmorphs;
-	 RooArgList overall_pars;
-	 std::vector< std::pair<double,double> > overall_vals;
-	 std::string norm_nom_name;
-	 double norm_nom = 1.;
-	 
+
+	 // Rate modifiers, in order, become a product of ProcessNormalizations. exportCoeffModifier
+	 // writes one as [symmetric normsys][asymmetric normsys][other factors][<sample>_norm_nominal],
+	 // so a new segment starts whenever the next modifier cannot follow in that order; the
+	 // re-export then has the same modifiers in the same order.
+	 struct RateSegment {
+	   enum Phase { Sym, Asym, Other, Nominal } phase = Sym;
+	   std::vector<std::pair<RooAbsReal*, std::pair<double,double>>> normsys;
+	   RooArgList others;
+	   double nominal = 1.;
+	 };
+	 std::vector<RateSegment> segments;
+	 auto segmentFor = [&segments](RateSegment::Phase phase) -> RateSegment& {
+	   if (segments.empty() || segments.back().phase > phase) segments.emplace_back();
+	   segments.back().phase = phase;
+	   return segments.back();
+	 };
+	 const std::string normNominalName = sampleName + "_norm_nominal";
+
          if (s.has_child("modifiers")) {
 	   for(const auto& m:s["modifiers"].children()){
 	     const std::string mtype = m["type"].val();
@@ -1592,11 +1623,20 @@ public:
 
                if (mtype == "normfactor") {
                   // Typical: a floating POI or nuisance scaling a process yield
- 		  if(parse_double(m["parameter"].val(),norm_nom)){
-		    norm_nom_name = m["parameter"].val();
+		  double value;
+		  if(parse_double(m["parameter"].val(),value)){
+		    // numeric: val() keeps only 6 significant digits, so read it with val_double()
+		    value = m["parameter"].val_double();
+		    if (mname == normNominalName) {
+		      segmentFor(RateSegment::Nominal).nominal = value;
+		    } else {
+		      auto *c = new RooConstVar(mname.c_str(), mname.c_str(), value);
+		      tool->workspace()->import(*c, RooFit::RecycleConflictNodes());
+		      segmentFor(RateSegment::Other).others.add(*tool->workspace()->arg(mname.c_str()));
+		    }
 		  } else {
-		    RooRealVar &p = getOrMakeParameter(tool, mname, 1.0, 0.0, 10.0);
-		    coeffFactors.add(p);
+		    RooRealVar &p = getOrMakeParameter(tool, m["parameter"].val(), 1.0, 0.0, 10.0);
+		    segmentFor(RateSegment::Other).others.add(p);
 		  }
 	       } else if (mtype == "custom"){
                   // This might be normalization factor that is given by a ProcessNormalization or RooFormulaVar
@@ -1606,7 +1646,7 @@ public:
 					     "CMSHistSum importer: custom modifier '" + mname + "' on sample '" + sampleName +
 					     "' not yet imported, there seems to be a priority/ordering issue");
 		  }
-		  coeffFactors.add(*obj);
+		  segmentFor(RateSegment::Other).others.add(*obj);
                } else if (mtype == "staterror") {
                   // Already encoded via per-bin errors; CMSHistSum will handle BBB if configured.
                   continue;
@@ -1617,9 +1657,8 @@ public:
 		 auto& data = m["data"];
 		 double lo = data["lo"].val_double();
 		 double hi = data["hi"].val_double();
-		 overall_pars.add(p);
-		 overall_vals.push_back(std::make_pair(lo,hi));
-		 
+		 const bool sym = approxSymmetricKappas(lo, hi);
+		 segmentFor(sym ? RateSegment::Sym : RateSegment::Asym).normsys.push_back({&p, {lo, hi}});
 	       } else if (mtype == "histosys"){
 		 // collect all the histosys first, will assign them later when we know how many there are
 		 auto *parameter = m.find("parameter");
@@ -1649,38 +1688,33 @@ public:
 	   func->setShape(0, 0, i+1, 1, vmorphs[i].high);
 	 }
          funcs.add(*func);
-	 
-	 // actually assign the overall sys
-	 if(overall_pars.size() > 0){
-	   RooAbsReal* norm = ONE;
-	   if(norm_nom != 1.){
-	          // TODO: This is not safe; in presence of multiple explicit <double> normfactor only last one will be appplied as ProcessNormalization; the reset will silently not be used - i think.
-	     norm = new RooRealVar(norm_nom_name.c_str(),norm_nom_name.c_str(),norm_nom);
-	   }
-	   const std::string pnName = distName + "_overallsys_" + sampleName;
-	   auto* pn = new ProcessNormalization(pnName.c_str(), pnName.c_str(), *norm);
-	   for(size_t i=0; i<overall_pars.size(); ++i){
-	     auto par = dynamic_cast<RooAbsReal*>(&(overall_pars[i]));
-	     if(approxSymmetricKappas(overall_vals[i].first,overall_vals[i].second)){
-	       pn->addLogNormal(overall_vals[i].first * norm_nom, *par);
+
+	 RooArgList coeffFactors;
+	 for (std::size_t iseg = 0; iseg < segments.size(); ++iseg) {
+	   RateSegment const &seg = segments[iseg];
+	   const std::string pnName = distName + "_overallsys_" + sampleName + (iseg ? "_" + std::to_string(iseg) : "");
+	   auto* pn = new ProcessNormalization(pnName.c_str(), pnName.c_str(), seg.nominal);
+	   for (auto const &[par, kappas] : seg.normsys) {
+	     // lo/hi are the relative factors at theta = -1/+1: symmetric kappa = hi (kappa^theta)
+	     if (approxSymmetricKappas(kappas.first, kappas.second)) {
+	       pn->addLogNormal(kappas.second, *par);
 	     } else {
-	       pn->addAsymmLogNormal(overall_vals[i].first * norm_nom, overall_vals[i].second * norm_nom, *par);
+	       pn->addAsymmLogNormal(kappas.first, kappas.second, *par);
 	     }
 	   }
+	   for (auto *other : seg.others) pn->addOtherFactor(static_cast<RooAbsReal &>(*other));
 	   coeffFactors.add(*pn);
 	 }
- 
-         RooAbsReal *coeff = ONE; // default coefficient 1
-         if (coeffFactors.getSize() == 1) {
-            coeff = dynamic_cast<RooAbsReal *>(coeffFactors.at(0));
-         } else if (coeffFactors.getSize() > 1) {
-            const std::string coeffName = distName + "_" + sampleName + "_rate";
-            auto *prod = new RooProduct(coeffName.c_str(), coeffName.c_str(), coeffFactors);
-            tool->workspace()->import(*prod, RooFit::RecycleConflictNodes());
-            coeff = dynamic_cast<RooAbsReal *>(tool->workspace()->function(coeffName.c_str()));
-            if (!coeff)
-               throw std::runtime_error("CMSHistSum importer: failed to import coefficient product '" + coeffName + "'");
-         }
+
+         // One coefficient object per sample, even for a single (possibly shared) factor: it
+         // carries the sample name for the exporter (cms_hist_sum_process_name).
+         const std::string coeffName = distName + "_" + sampleName + "_rate";
+         auto *prod = new RooProduct(coeffName.c_str(), coeffName.c_str(), coeffFactors);
+         prod->setStringAttribute("combine.process", sampleName.c_str());
+         tool->workspace()->import(*prod, RooFit::RecycleConflictNodes());
+         RooAbsReal *coeff = tool->workspace()->function(coeffName.c_str());
+         if (!coeff)
+            throw std::runtime_error("CMSHistSum importer: failed to import coefficient product '" + coeffName + "'");
          coeffs.add(*coeff);
       }
 

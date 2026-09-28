@@ -1312,6 +1312,9 @@ inline bool isSingleBinCountingDist(RooFit::Detail::JSONNode const &elem)
         } else {
             auto const *nb = ax.find("nbins");
             if (!nb || nb->val_int() != 1) return false;
+            // the count axis n_obs_bin<b> is unbounded above; a 1-bin shape channel is not
+            auto const *mx = ax.find("max");
+            if (mx && !mx->is_null()) return false;
         }
     }
 
@@ -1714,6 +1717,35 @@ public:
 
 };
 
+// True if every sample's nominal contents and every histosys hi/lo template sums to 1. The
+// tolerance only has to separate normalized shapes from templates in events; this file's exporter
+// can be off by the 1e-9 crop floor in empty bins (3e-8 for part4's 31-bin templates).
+bool allTemplatesNormalized(RooFit::Detail::JSONNode const &elem)
+{
+    auto normalized = [](RooFit::Detail::JSONNode const &contents) {
+        std::vector<double> v;
+        for (auto const &c : contents.children()) v.push_back(c.val_double());
+        double sum = 0.;
+        for (double x : v) sum += x;
+        return std::abs(sum - 1.) <= 1e-6;
+    };
+    auto const *samples = elem.find("samples");
+    if (!samples) return false;
+    for (auto const &s : samples->children()) {
+        auto const *contents = s.find("data", "contents");
+        if (!contents || !normalized(*contents)) return false;
+        if (auto const *mods = s.find("modifiers")) {
+            for (auto const &m : mods->children()) {
+                if (m["type"].val() != "histosys") continue;
+                auto const *hi = m.find("data", "hi", "contents");
+                auto const *lo = m.find("data", "lo", "contents");
+                if (!hi || !lo || !normalized(*hi) || !normalized(*lo)) return false;
+            }
+        }
+    }
+    return true;
+}
+
 class SumOfFastVerticalInterpHistPdf2Factory_RooAddition : public RooFit::JSONIO::Importer{
 public:
     bool importArg(RooJSONFactoryWSTool *tool, RooFit::Detail::JSONNode const &elem) const override
@@ -1725,6 +1757,12 @@ public:
 
         // Single-bin counting nodes belong to the RooPoisson/RooAddition importer.
         if (isSingleBinCountingDist(elem)) return false;
+
+        // FastVerticalInterpHistPdf2 is a normalized shape with a separate yield, so it only
+        // equals the histfactory_dist if every template already sums to 1 (as this file's exporter
+        // writes them). Templates in events (e.g. from CMSHistErrorPropagator) go to the CMSHistSum
+        // importer, which keeps them as they are.
+        if (!allTemplatesNormalized(elem)) return false;
 
         // Axes: we only support 1D here
         if (!elem.has_child("axes") || elem["axes"].num_children() != 1)

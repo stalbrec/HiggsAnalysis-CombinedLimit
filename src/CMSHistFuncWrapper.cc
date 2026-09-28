@@ -167,6 +167,9 @@ public:
      xTmp.setBins(static_cast<int>(c.fullsize()));
      RooArgSet obs(xTmp);
      tool->exportHisto(obs, c.fullsize(), c.Values().data(), elem["data"].set_map());
+     // The snapshot reimports as a RooHistFunc of the real observable, which ROOT exports as a
+     // dependant; export it here too, so the first export already matches.
+     tool->queueExport(*xOrig);
      elem["type"] << key();
      return true;
    }

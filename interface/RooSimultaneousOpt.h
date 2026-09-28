@@ -6,6 +6,10 @@
 #include "RooSimultaneous.h"
 #include "RooListProxy.h"
 
+#include <string>
+
+class RooWorkspace;
+
 class RooSimultaneousOpt : public RooSimultaneous {
 public:
 	RooSimultaneousOpt(){};
@@ -49,6 +53,15 @@ public:
   void addExtraConstraint(const RooAbsPdf &pdf) ;
   void addExtraConstraints(const RooAbsCollection &pdfs) ;
   void addChannelMasks(const RooArgList &args);
+
+  // HS3: the model is exported unmasked (vanilla), the masks as constant parameters, and the
+  // channel -> mask association as misc.CMS.channel_masks = {"<channel label>": "<mask name>"}.
+  // exportJSON: RooJSONFactoryWSTool::exportJSON plus that entry, taken from every
+  // RooSimultaneousOpt in ws with masks (false if they disagree).
+  // importChannelMasksJSON: read the entry from an HS3 file and set the masks from the objects of
+  // those names in ws. No entry: no masks, returns true. False if the entry does not fit.
+  static bool exportJSON(RooWorkspace &ws, const std::string &fileName);
+  bool importChannelMasksJSON(const std::string &fileName, RooWorkspace &ws);
 private:
   ClassDefOverride(RooSimultaneousOpt,3) // Variant of RooSimultaneous that can put together binned and unbinned stuff 
 

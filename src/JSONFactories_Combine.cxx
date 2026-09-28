@@ -107,6 +107,11 @@ bool isSingleBinCountingDist(JSONNode const &elem)
          auto const *nb = ax.find("nbins");
          if (!nb || nb->val_int() != 1)
             return false;
+         // the count axis n_obs_bin<b> is unbounded above (writeAxisBound: null); a 1-bin shape
+         // channel (CMS_TH1obs_<channel>, [0, 1]) is not
+         auto const *mx = ax.find("max");
+         if (mx && !mx->is_null())
+            return false;
       }
    }
 

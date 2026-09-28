@@ -3,6 +3,15 @@
 #include "../interface/Combine.h"
 
 #include <RooCmdConfig.h>
+#include <RooWorkspace.h>
+#include <RooFit/Detail/JSONInterface.h>
+#include <RooFitHS3/RooJSONFactoryWSTool.h>
+
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <sstream>
 
 #if ROOT_VERSION_CODE < ROOT_VERSION(6,30,0)
 RooAbsReal* 
@@ -58,4 +67,79 @@ RooSimultaneousOpt::addChannelMasks(const RooArgList &args)
     }
     _channelMasks.removeAll();
     _channelMasks.add(args);
+}
+
+namespace {
+// CachingSimNLL pairs mask i with category bin i (setBin(i)), whatever the state indices are.
+std::map<std::string, std::string> channelMaskNames(const RooSimultaneousOpt &pdf)
+{
+    std::map<std::string, std::string> out;
+    std::unique_ptr<RooAbsCategoryLValue> cat{static_cast<RooAbsCategoryLValue *>(pdf.indexCat().Clone())};
+    for (int i = 0, n = pdf.channelMasks().getSize(); i < n; ++i) {
+        cat->setBin(i);
+        out[cat->getLabel()] = pdf.channelMasks().at(i)->GetName();
+    }
+    return out;
+}
+} // namespace
+
+bool
+RooSimultaneousOpt::exportJSON(RooWorkspace &ws, const std::string &fileName)
+{
+    std::map<std::string, std::string> masks;
+    for (RooAbsArg *arg : ws.components()) {
+        auto *opt = dynamic_cast<RooSimultaneousOpt *>(arg);
+        if (!opt || opt->channelMasks().getSize() == 0) continue;
+        for (auto const &[channel, mask] : channelMaskNames(*opt)) {
+            auto [it, inserted] = masks.emplace(channel, mask);
+            if (!inserted && it->second != mask) {
+                std::cerr << "RooSimultaneousOpt::exportJSON: channel " << channel << " has masks " << it->second
+                          << " and " << mask << "\n";
+                return false;
+            }
+        }
+    }
+    RooJSONFactoryWSTool tool(ws);
+    if (masks.empty()) return tool.exportJSON(fileName);
+
+    std::unique_ptr<RooFit::Detail::JSONTree> tree = RooFit::Detail::JSONTree::create(tool.exportJSONtoString());
+    auto &node = tree->rootnode().get("misc", "CMS", "channel_masks").set_map();
+    for (auto const &[channel, mask] : masks) node[channel] << mask;
+    std::ofstream out(fileName);
+    if (!out) return false;
+    tree->rootnode().writeJSON(out);
+    return bool(out);
+}
+
+bool
+RooSimultaneousOpt::importChannelMasksJSON(const std::string &fileName, RooWorkspace &ws)
+{
+    std::ifstream in(fileName);
+    if (!in) return false;
+    std::unique_ptr<RooFit::Detail::JSONTree> tree = RooFit::Detail::JSONTree::create(in);
+    const RooFit::Detail::JSONNode *node = tree->rootnode().find("misc", "CMS", "channel_masks");
+    if (!node) return true;
+    if (!node->is_map()) return false;
+    std::map<std::string, std::string> masks;
+    for (auto const &child : node->children()) masks[child.key()] = child.val();
+
+    RooArgList list;
+    std::unique_ptr<RooAbsCategoryLValue> cat{static_cast<RooAbsCategoryLValue *>(indexCat().Clone())};
+    for (int i = 0, n = cat->numBins(nullptr); i < n; ++i) {
+        cat->setBin(i);
+        auto it = masks.find(cat->getLabel());
+        RooAbsReal *mask = it == masks.end() ? nullptr : dynamic_cast<RooAbsReal *>(ws.arg(it->second.c_str()));
+        if (!mask) {
+            std::cerr << "RooSimultaneousOpt::importChannelMasksJSON: no mask for channel " << cat->getLabel() << "\n";
+            return false;
+        }
+        list.add(*mask);
+        masks.erase(it);
+    }
+    if (!masks.empty()) {
+        std::cerr << "RooSimultaneousOpt::importChannelMasksJSON: mask for unknown channel " << masks.begin()->first << "\n";
+        return false;
+    }
+    addChannelMasks(list);
+    return true;
 }
