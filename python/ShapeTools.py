@@ -1287,6 +1287,9 @@ class ShapeBuilder(ModelBuilder):
                             tlist,
                             ROOT.RooArgList(),
                         )
+                        if self.options.optimizeTemplateBins and shape._original_bins < self.out.maxbins:
+                            # as for the morphing samples: crop and normalize over the observed bins only
+                            rhp.setActiveBins(shape._original_bins)
                     _cache[shape.GetName() + "Pdf"] = rhp
                 else:
                     rdh = self.shape2Data(shape, channel, process)

@@ -318,7 +318,7 @@ public:
     FastVerticalInterpHistPdf2Base(other, name),
     _x("x",this,other._x),
     _cache(other._cache), _cacheNominal(other._cacheNominal), _cacheNominalLog(other._cacheNominalLog),
-    _inputMorphs(other._inputMorphs)  {}
+    _inputNominal(other._inputNominal), _inputMorphs(other._inputMorphs)  {}
   explicit FastVerticalInterpHistPdf2(const FastVerticalInterpHistPdf& other, const char* name=0) ;
   TObject* clone(const char* newname) const override { return new FastVerticalInterpHistPdf2(*this,newname) ; }
 
@@ -331,9 +331,10 @@ public:
 
   FastHisto const &cacheNominal() const { return _cacheNominal; }
 
-  /// hi/lo templates exactly as passed to the constructor (TH1 input only), before normalization
-  /// and the sum/diff transform; empty if the object was read from a file. Used by the HS3
-  /// exporter to write back the input unchanged, since rebuilding it from _morphs is not exact.
+  /// Nominal and hi/lo templates exactly as passed to the constructor (TH1 input only), before
+  /// normalization and the sum/diff transform; empty if the object was read from a file. Used by
+  /// the HS3 exporter to write back the input unchanged, since rebuilding it is not exact.
+  FastHisto const &inputNominal() const { return _inputNominal; }
   std::vector<std::pair<FastHisto, FastHisto>> const &inputMorphs() const { return _inputMorphs; }
 
   friend class FastVerticalInterpHistPdf2V;
@@ -347,6 +348,7 @@ protected:
   FastHisto _cacheNominal; 
   FastHisto _cacheNominalLog; 
 
+  FastHisto _inputNominal; //! not to be serialized
   std::vector<std::pair<FastHisto, FastHisto>> _inputMorphs; //! not to be serialized
 
   void syncTotal() const ;

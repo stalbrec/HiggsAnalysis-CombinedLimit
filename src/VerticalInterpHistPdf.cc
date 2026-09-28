@@ -903,6 +903,7 @@ void FastVerticalInterpHistPdf2::initNominal(TObject *templ) {
     TH1 *hist = dynamic_cast<TH1*>(templ);
     if (hist) {
         _cacheNominal = FastHisto(*hist);
+        _inputNominal = _cacheNominal;
     } else {
         RooAbsPdf *pdf = dynamic_cast<RooAbsPdf *>(templ);
         const RooRealVar &x = dynamic_cast<const RooRealVar &>(_x.arg());
@@ -1490,6 +1491,49 @@ bool decomposeCoefficient(RooAbsArg *coeff, CoefficientParts &out, std::string &
    return true;
 }
 
+// Number of template bins to export: the smallest active size. text2workspace (ShapeTools.py)
+// calls setActiveBins() on morphing samples whose observable has fewer bins than their templates
+// (part4: 31-bin templates, observables with 1 and 18 bins); the active size is persisted, and
+// FastVerticalInterpHistPdf2 crops (to 1e-9) and normalizes over its active bins only. Samples
+// without morphs keep all bins active, so their extra bins do take part in the normalization;
+// the exporter writes what they evaluate to instead (see croppedHead). A morphing sample with
+// more active bins than that has a parameter-dependent normalization over bins outside the axis,
+// which histfactory_dist cannot express, so it is declined.
+static int activeBins(RooArgList const &summands, std::string const &name)
+{
+    int n = -1;
+    for (auto const *s : summands) {
+        int size = static_cast<FastVerticalInterpHistPdf2 const *>(s)->cacheNominal().size();
+        if (n < 0 || size < n) n = size;
+    }
+    for (auto const *s : summands) {
+        auto const &pdf = *static_cast<FastVerticalInterpHistPdf2 const *>(s);
+        if (!pdf.morphs().empty() && int(pdf.cacheNominal().size()) > n) {
+            RooJSONFactoryWSTool::error("SumOfFastVerticalInterpHistPdf2 '" + name + "': morphing sample '" +
+                                        pdf.GetName() + "' has more active bins than the " + std::to_string(n) +
+                                        " shared by all samples.");
+        }
+    }
+    return n;
+}
+
+// What an unmorphed FastVerticalInterpHistPdf2 evaluates to in its first nBins bins (syncTotal:
+// crop to 1e-9 and normalize over all active bins), and the sum of those values. The sum is below
+// 1 when active bins lie beyond nBins; the reimported sample is normalized over nBins only, so the
+// exporter moves the sum into the sample's yield.
+static std::vector<double> croppedHead(FastHisto const &nominal, int nBins, double &headSum)
+{
+    double total = 0.;
+    for (unsigned ib = 0; ib < nominal.size(); ++ib) total += std::max(nominal[ib], 1e-9) * nominal.GetWidth(ib);
+    std::vector<double> out(nBins);
+    headSum = 0.;
+    for (int ib = 0; ib < nBins; ++ib) {
+        out[ib] = std::max(nominal[ib], 1e-9) / total;
+        headSum += out[ib] * nominal.GetWidth(ib);
+    }
+    return out;
+}
+
 bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const RooAddPdf *sum, JSONNode &elem){
     auto summands = sum->pdfList();
     const unsigned nProcs = summands.getSize();
@@ -1552,7 +1596,7 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const RooAddPdf *sum, JSON
 
     auto &samples = elem["samples"].set_seq();
 
-    int nBins(0);
+    const int nBins = activeBins(summands, sum->GetName());
 
     for (unsigned ip = 0; ip < nProcs; ++ip) {
         auto * fvih = dynamic_cast<const FastVerticalInterpHistPdf2 *>(summands.at(ip));
@@ -1563,15 +1607,17 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const RooAddPdf *sum, JSON
         const auto nominal = fvih->cacheNominal();
 
         auto &dataNode = s["data"].set_map();
-        int proc_nBins = nominal.fullsize();
-
-        if(nBins != 0 && proc_nBins != nBins){
-        RooJSONFactoryWSTool::error("SumOfFastVerticalInterpHistPdf2 '" + std::string(sum->GetName()) + 
-                                    "': samples have not same number of bins!");
+        double yieldScale = 1.;
+        if (int(nominal.size()) > nBins) {
+            // unmorphed, with active bins beyond the axis (activeBins() declines the other case)
+            auto const head = croppedHead(nominal, nBins, yieldScale);
+            RooJSONFactoryWSTool::exportArray(nBins, head.data(), dataNode["contents"]);
+        } else {
+            // Built from histograms in this process: write the input nominal back unchanged.
+            auto const &input = fvih->inputNominal();
+            auto const &contents = input.fullsize() == unsigned(nBins) ? input.Values() : nominal.Values();
+            RooJSONFactoryWSTool::exportArray(nBins, contents.data(), dataNode["contents"]);
         }
-        nBins = proc_nBins;
-
-        RooJSONFactoryWSTool::exportArray(nBins, nominal.Values().data(), dataNode["contents"]);
 
         auto &mods = s["modifiers"].set_seq();
 
@@ -1635,7 +1681,7 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const RooAddPdf *sum, JSON
                               std::exp(logAsymmKappa[i].second));
             }
 
-            const double nom = pn->nominalValue();
+            const double nom = pn->nominalValue() * yieldScale;
             if (nom != 1.) {
                 auto &m = mods.append_child().set_map();
                 m["name"] << sampleName + "_norm_nominal";
@@ -1645,6 +1691,11 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const RooAddPdf *sum, JSON
             for (auto const *of : pn->otherFactorList()) {
                 exportOtherFactorModifiers(tool, mods, static_cast<RooAbsReal const *>(of));
             }
+        } else if (yieldScale != 1.) {
+            auto &m = mods.append_child().set_map();
+            m["name"] << sampleName + "_norm_nominal";
+            m["parameter"] << yieldScale;
+            m["type"] << "normfactor";
         }
 
 
@@ -1820,8 +1871,9 @@ public:
                             // A normfactor whose "parameter" is a literal number is a plain
                             // multiplicative constant. Several can occur on one sample (the process
                             // nominal plus any RooConstVar factor), so they accumulate rather than
-                            // overwrite each other.
-                            norm_nom *= numeric;
+                            // overwrite each other. val() only has 6 significant digits, so the
+                            // value itself is read with val_double().
+                            norm_nom *= m["parameter"].val_double();
                         } else {
                             RooRealVar &p = getOrMakeParameter(tool, mname, 1.0, 0.0, 10.0);
                             normfactor_pars.add(p);
