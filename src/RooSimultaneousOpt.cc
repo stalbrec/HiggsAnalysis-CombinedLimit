@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <sstream>
+#include <vector>
 
 #if ROOT_VERSION_CODE < ROOT_VERSION(6,30,0)
 RooAbsReal* 
@@ -99,6 +100,28 @@ RooSimultaneousOpt::exportJSON(RooWorkspace &ws, const std::string &fileName)
             }
         }
     }
+    // The extra constraints are exported where the channels' modifiers name them (CombineHS3Channel.h),
+    // which is also where a re-export of the imported JSON finds them: Combine's histfactory_dist
+    // importers put them into the channels, and a plain import builds a bare RooSimultaneous. Left
+    // attached, ROOT would export them first, as servers of the RooSimultaneousOpt, and the order of
+    // distributions, parameters and domains would differ from a re-export. Detached only for the
+    // export; unreferenced ones still go out (other clients, or as top-level pdfs).
+    struct Detached {
+        RooSimultaneousOpt *opt;
+        RooArgList constraints;
+    };
+    std::vector<Detached> detached;
+    for (RooAbsArg *arg : ws.components()) {
+        auto *opt = dynamic_cast<RooSimultaneousOpt *>(arg);
+        if (!opt || opt->_extraConstraints.getSize() == 0) continue;
+        detached.push_back({opt, RooArgList(opt->_extraConstraints)});
+        opt->_extraConstraints.removeAll();
+    }
+    struct Restore {
+        std::vector<Detached> &d;
+        ~Restore() { for (auto &x : d) x.opt->_extraConstraints.add(x.constraints); }
+    } restore{detached};
+
     RooJSONFactoryWSTool tool(ws);
     if (masks.empty()) return tool.exportJSON(fileName);
 

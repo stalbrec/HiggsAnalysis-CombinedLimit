@@ -448,6 +448,9 @@ void Combine::run(TString hlfFile, const std::string &dataset, double &limit, do
             obsWithCats.add(w->allCats(), /*silent=*/true);
             mc->SetObservables(obsWithCats);
             RooArgList extraConstrs;
+            // Constraints the histfactory_dist importers already put into the channels (modifier
+            // `constraint`, CombineHS3Channel.h) are part of the model and must not be added twice.
+            std::unique_ptr<RooArgSet> modelComponents{pdf->getComponents()};
             for (RooAbsArg *arg : w->allPdfs()) {
               auto *cpdf = dynamic_cast<RooAbsPdf *>(arg);
 
@@ -456,6 +459,9 @@ void Combine::run(TString hlfFile, const std::string &dataset, double &limit, do
 
               // skip if cpdf depends on a observable
               if (cpdf->dependsOn(*mc->GetObservables())) continue;
+
+              // skip if a channel already contains it
+              if (modelComponents->find(*cpdf)) continue;
 
               extraConstrs.add(*cpdf);
             }

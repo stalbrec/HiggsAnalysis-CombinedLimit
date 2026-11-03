@@ -5,17 +5,21 @@
 #include "RooFit.h"
 
 #include "../interface/ProcessNormalization.h"
+#include "../interface/CombineHS3Channel.h"
 
 #include "RooAddition.h"
 #include "RooArgList.h"
 #include "RooConstVar.h"
 #include "RooNumber.h"
 #include "RooPoisson.h"
+#include "RooProdPdf.h"
+#include "RooSimultaneous.h"
 #include "RooRealVar.h"
 #include "RooWorkspace.h"
 
 #include <charconv>
 #include <map>
+#include <set>
 #include <memory>
 #include <cmath>
 #include <string>
@@ -159,7 +163,7 @@ void writeSingleBinContents(JSONNode &sample, double value)
 }
 
 std::string resolveConstraintPdfName(RooJSONFactoryWSTool *tool, RooAbsArg const &theta,
-                                     RooAbsCollection const &observables,
+                                     RooAbsCollection const &observables, RooAbsArg const &channel,
                                      std::map<std::string, std::string> &cache)
 {
    const std::string thetaName(theta.GetName());
@@ -192,7 +196,9 @@ std::string resolveConstraintPdfName(RooJSONFactoryWSTool *tool, RooAbsArg const
 
    std::string name;
    if (constraint) {
-      name = constraint->GetName();
+      // Named only if no enclosing product applies it already (CombineHS3Channel.h).
+      if (!CombineHS3::constraintAppliedOutside(channel, *constraint))
+         name = constraint->GetName();
       // The referenced name has to exist in the output, and this exporter does not
       // autoExportDependants.
       tool->queueExport(*constraint);
@@ -202,13 +208,14 @@ std::string resolveConstraintPdfName(RooJSONFactoryWSTool *tool, RooAbsArg const
 }
 
 void exportNormSys(RooJSONFactoryWSTool *tool, JSONNode &mods, RooAbsArg const &theta, double kappaLo, double kappaHi,
-                   RooAbsCollection const &observables, std::map<std::string, std::string> &constraintCache)
+                   RooAbsCollection const &observables, RooAbsArg const &channel,
+                   std::map<std::string, std::string> &constraintCache)
 {
    auto &m = mods.append_child().set_map();
    m["name"] << theta.GetName();
    m["parameter"] << theta.GetName();
    m["type"] << "normsys";
-   const std::string constraint = resolveConstraintPdfName(tool, theta, observables, constraintCache);
+   const std::string constraint = resolveConstraintPdfName(tool, theta, observables, channel, constraintCache);
    if (!constraint.empty())
       m["constraint"] << constraint;
    auto &data = m["data"].set_map();
@@ -278,13 +285,13 @@ bool tryExportCountingHistFactory(RooJSONFactoryWSTool *tool, const RooPoisson *
          auto const &logKappa = pn->logKappa();
          for (int i = 0; i < static_cast<int>(logKappa.size()); ++i) {
             exportNormSys(tool, mods, pn->thetaList()[i], std::exp(-logKappa[i]), std::exp(logKappa[i]), observables,
-                          constraintCache);
+                          *pois, constraintCache);
          }
          // asymmetric log-normals
          auto const &logAsymmKappa = pn->logAsymmKappa();
          for (int i = 0; i < static_cast<int>(logAsymmKappa.size()); ++i) {
             exportNormSys(tool, mods, pn->asymmThetaList()[i], std::exp(logAsymmKappa[i].first),
-                          std::exp(logAsymmKappa[i].second), observables, constraintCache);
+                          std::exp(logAsymmKappa[i].second), observables, *pois, constraintCache);
          }
          for (auto *of : pn->otherFactorList()) {
             exportOtherFactorModifiers(tool, mods, static_cast<RooAbsReal *>(of));
@@ -461,16 +468,164 @@ public:
          throw std::runtime_error("SumOfRooPoisson importer: failed to import RooAddition '" + sumName + "'");
 
       // combine always builds these counting Poissons with noRounding=1.
-      RooPoisson pdf(distName.c_str(), distName.c_str(), *x, *n_exp, /*noRounding=*/true);
+      const std::string coreName = CombineHS3::channelCoreName(elem);
+      RooPoisson pdf(coreName.c_str(), distName.c_str(), *x, *n_exp, /*noRounding=*/true);
       tool->workspace()->import(pdf, RooFit::RecycleConflictNodes());
-      if (!tool->workspace()->pdf(distName))
-         throw std::runtime_error("SumOfRooPoisson importer: failed to import RooPoisson '" + distName + "'");
+      if (!tool->workspace()->pdf(coreName))
+         throw std::runtime_error("SumOfRooPoisson importer: failed to import RooPoisson '" + coreName + "'");
+      CombineHS3::wrapChannelInConstraints(tool, elem);
 
       return true;
    }
 };
 
 } // namespace
+
+// ---------------------------------------------------------------------------------------------
+// Constraint terms inside the channels (CombineHS3Channel.h)
+// ---------------------------------------------------------------------------------------------
+namespace {
+// While exportConstrainedChannel() exports the core of a RooProdPdf(<name>, [<name>_model,
+// constraints]), the product stands in for the core in constraintAppliedOutside(): its own
+// constraint factors are the channel's, not an enclosing product's.
+thread_local RooAbsArg const *g_wrappedCore = nullptr;
+thread_local RooAbsArg const *g_wrapper = nullptr;
+} // namespace
+
+std::vector<std::string> CombineHS3::modifierConstraintNames(JSONNode const &elem)
+{
+   std::vector<std::string> names;
+   std::set<std::string> seen;
+   auto const *samples = elem.find("samples");
+   if (!samples)
+      return names;
+   for (auto const &s : samples->children()) {
+      auto const *mods = s.find("modifiers");
+      if (!mods)
+         continue;
+      for (auto const &m : mods->children()) {
+         auto const *c = m.find("constraint");
+         if (!c || c->is_null())
+            continue;
+         const std::string name = c->val();
+         if (!name.empty() && seen.insert(name).second)
+            names.push_back(name);
+      }
+   }
+   return names;
+}
+
+std::string CombineHS3::channelCoreName(JSONNode const &elem)
+{
+   const std::string name = elem["name"].val();
+   return modifierConstraintNames(elem).empty() ? name : name + "_model";
+}
+
+void CombineHS3::wrapChannelInConstraints(RooJSONFactoryWSTool *tool, JSONNode const &elem)
+{
+   const std::vector<std::string> names = modifierConstraintNames(elem);
+   if (names.empty())
+      return;
+   const std::string distName = elem["name"].val();
+   RooAbsPdf *core = tool->workspace()->pdf(distName + "_model");
+   if (!core)
+      throw std::runtime_error("histfactory_dist importer: channel '" + distName + "_model' was not imported");
+   RooArgList factors(*core);
+   for (auto const &n : names)
+      factors.add(*tool->request<RooAbsPdf>(n, distName));
+   RooProdPdf prod(distName.c_str(), distName.c_str(), factors);
+   tool->workspace()->import(prod, RooFit::RecycleConflictNodes(), RooFit::Silence());
+   if (!tool->workspace()->pdf(distName))
+      throw std::runtime_error("histfactory_dist importer: failed to import RooProdPdf '" + distName + "'");
+}
+
+bool CombineHS3::constraintAppliedOutside(RooAbsArg const &channel, RooAbsArg const &constraint)
+{
+   RooAbsArg const *start = (&channel == g_wrappedCore && g_wrapper) ? g_wrapper : &channel;
+   std::vector<RooAbsArg const *> todo{start};
+   std::set<RooAbsArg const *> visited{start};
+   while (!todo.empty()) {
+      RooAbsArg const *node = todo.back();
+      todo.pop_back();
+      for (RooAbsArg const *client : node->clients()) {
+         if (auto const *prod = dynamic_cast<RooProdPdf const *>(client)) {
+            if (!prod->pdfList().containsInstance(*node))
+               continue;
+            for (RooAbsArg const *f : prod->pdfList()) {
+               if (f == node)
+                  continue;
+               if (f == &constraint || f->dependsOn(constraint))
+                  return true;
+            }
+         } else if (!dynamic_cast<RooSimultaneous const *>(client)) {
+            // the other channels of a RooSimultaneous are not multiplied with this one
+            continue;
+         }
+         if (visited.insert(client).second)
+            todo.push_back(client);
+      }
+   }
+   return false;
+}
+
+bool CombineHS3::exportConstrainedChannel(RooJSONFactoryWSTool *tool, RooProdPdf const &prod, JSONNode &elem)
+{
+   RooArgList const &factors = prod.pdfList();
+   if (factors.size() < 2)
+      return false;
+   RooAbsArg const *core = factors.at(0);
+   const std::string name = prod.GetName();
+   if (core->GetName() != name + "_model")
+      return false;
+
+   auto it = RooFit::JSONIO::exporters().find(core->IsA());
+   if (it == RooFit::JSONIO::exporters().end())
+      return false;
+
+   auto reset = [&]() {
+      elem.clear();
+      elem.set_map();
+      elem["name"] << name;
+   };
+   bool done = false;
+   g_wrappedCore = core;
+   g_wrapper = &prod;
+   try {
+      for (auto const &exp : it->second) {
+         if (exp->key() != "histfactory_dist")
+            continue;
+         if (exp->exportObject(tool, core, elem)) {
+            if (exp->autoExportDependants()) {
+               for (RooAbsArg *server : core->servers())
+                  tool->queueExport(*server);
+            }
+            done = true;
+            break;
+         }
+         reset();
+      }
+   } catch (...) {
+      g_wrappedCore = g_wrapper = nullptr;
+      throw;
+   }
+   g_wrappedCore = g_wrapper = nullptr;
+   if (!done)
+      return false;
+
+   // Only if importing the result gives this product back: same constraints, same order.
+   const std::vector<std::string> named = modifierConstraintNames(elem);
+   bool same = named.size() + 1 == factors.size();
+   for (std::size_t i = 0; same && i < named.size(); ++i)
+      same = named[i] == factors.at(i + 1)->GetName();
+   if (!same) {
+      reset();
+      return false;
+   }
+   for (std::size_t i = 1; i < factors.size(); ++i)
+      tool->queueExport(*factors.at(i));
+   elem["name"] << name;
+   return true;
+}
 
 STATIC_EXECUTE([]() {
    using namespace RooFit::JSONIO;

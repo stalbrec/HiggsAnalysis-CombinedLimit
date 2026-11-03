@@ -160,11 +160,12 @@ public:
          RooJSONFactoryWSTool::error("no x0/y0 given in '" + name + "'");
       }
 
-      // Unified schema: reject log flags unless false/missing
-      const bool logx = p.has_child("logx") ? p["logx"].val_bool() : false;
-      const bool logy = p.has_child("logy") ? p["logy"].val_bool() : false;
-      if (logx || logy) {
-         RooJSONFactoryWSTool::error("RooSpline1D cannot represent logx/logy in '" + name + "'");
+      // This importer runs before ROOT's (priority, see below), because ROOT's "spline" importer
+      // builds a RooSpline (TSpline3), which does not evaluate like RooSpline1D's GSL interpolation
+      // for the same knots. ROOT's RooSpline exporter always writes logx/logy and the RooSpline1D
+      // exporter never does, so a spline with either key is left to ROOT's importer.
+      if (p.has_child("logx") || p.has_child("logy")) {
+         return false;
       }
 
       RooAbsReal *x = tool->requestArg<RooAbsReal>(p, "x");
@@ -174,7 +175,7 @@ public:
 
       // Reject poly5 (no quintic mode in RooSpline1D)
       if (interpolation == "poly5") {
-         RooJSONFactoryWSTool::error("RooSpline1D cannot represent interpolation 'poly5' in '" + name + "'");
+         return false; // RooSpline1D has no quintic mode; ROOT's RooSpline importer handles it
       }
 
       // Map unified poly3 -> RooSpline1D type
@@ -232,7 +233,7 @@ public:
 STATIC_EXECUTE([]() {
   using namespace RooFit::JSONIO;
   
-  registerImporter<RooSpline1DFactory>("spline", false);
+  registerImporter<RooSpline1DFactory>("spline", /*priority*/ true);
   registerExporter<RooSpline1DStreamer>("RooSpline1D", false);
  });
   

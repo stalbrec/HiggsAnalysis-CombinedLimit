@@ -1199,6 +1199,7 @@ void FastVerticalInterpHistPdf2V::fill(std::vector<Double_t> &out) const
 #include "RooProduct.h"
 #include "../interface/ProcessNormalization.h"
 #include "../interface/AsymPow.h"
+#include "../interface/CombineHS3Channel.h"
 #include <charconv>
 #include <map>
 #include <string>
@@ -1379,6 +1380,7 @@ static RooRealVar &getOrMakeParameter(RooJSONFactoryWSTool *tool, std::string co
 /// Per-export state threaded through the modifier emitters below.
 struct HistFactoryExportCtx {
    RooArgSet observables;                                //!< channel observables, for constraint lookup
+   RooAbsArg const *channel = nullptr;                   //!< the exported channel pdf
    std::map<std::string, std::string> constraintCache;   //!< theta name -> constraint pdf name ("" = none)
    std::map<std::string, std::string> sampleConstraints; //!< parameter -> constraint name, reset per sample
    std::string sampleName;
@@ -1413,7 +1415,9 @@ std::string resolveConstraintPdfName(RooJSONFactoryWSTool *tool, HistFactoryExpo
 
    std::string name;
    if (constraint) {
-      name = constraint->GetName();
+      // Named only if no enclosing product applies it already (CombineHS3Channel.h).
+      if (!ctx.channel || !CombineHS3::constraintAppliedOutside(*ctx.channel, *constraint))
+         name = constraint->GetName();
       // The referenced name has to exist in the output, and this exporter does not
       // autoExportDependants.
       tool->queueExport(*constraint);
@@ -1601,6 +1605,7 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const RooAddPdf *sum, JSON
 
     HistFactoryExportCtx ctx;
     ctx.observables.add(*x);
+    ctx.channel = sum;
 
     auto &axes = elem["axes"].set_seq();
     auto &ax = axes.append_child().set_map();
@@ -1917,10 +1922,30 @@ public:
             double norm_nom = 1.;
             const bool keepScale = shapeNormModifier(s) != nullptr;
 
+            // The exporter writes a sample's rate part as: ProcessNormalization normsys, then
+            // "<sample>_norm_nominal" and the other normfactor/custom factors, then the normsys of
+            // standalone AsymPows (the yield half of a `shape` systematic). A normsys that comes
+            // after a factor can therefore only be such an AsymPow, and one before every factor is a
+            // ProcessNormalization entry, even if its parameter also carries a histosys (text2workspace
+            // may put it there). Without any factor modifier the two cannot be told apart, and the
+            // parameter name alone decides, as before.
+            bool sampleHasFactor = false;
+            if (s.has_child("modifiers")) {
+                for (const auto &m : s["modifiers"].children()) {
+                    const std::string mtype = m["type"].val();
+                    if ((mtype == "normfactor" && m["name"].val() != sampleName + "_shape_norm") || mtype == "custom")
+                        sampleHasFactor = true;
+                }
+            }
+            bool factorSeen = false;
+            std::vector<bool> normsys_after_factor;
+
             if (s.has_child("modifiers")) {
                 for (const auto& m: s["modifiers"].children()) {
                     const std::string mtype = m["type"].val();
                     const std::string mname = m["name"].val();
+                    if (mtype == "custom" || (mtype == "normfactor" && !(keepScale && mname == sampleName + "_shape_norm")))
+                        factorSeen = true;
 
                     if (keepScale && mtype == "normfactor" && mname == sampleName + "_shape_norm") {
                         // 1/S of a nominal kept on its own scale: the FastVerticalInterpHistPdf2
@@ -1963,6 +1988,7 @@ public:
                         double lo = data["lo"].val_double();
                         normsys_pars.add(p);
                         normsys_vals.push_back(std::make_pair(lo,hi));
+                        normsys_after_factor.push_back(factorSeen);
 
                     } else if ( mtype == "histosys" ){
 
@@ -2017,7 +2043,8 @@ public:
                 // Promote at most one normsys per parameter; a parameter carrying both a `shape` and
                 // an `lnN` line legitimately produces two, and the remainder belong in the
                 // ProcessNormalization. The factors commute, so the split is faithful either way.
-                if (histosys_par_names.count(parname) && promoted.insert(parname).second) {
+                const bool asymPowPosition = !sampleHasFactor || normsys_after_factor[i];
+                if (asymPowPosition && histosys_par_names.count(parname) && promoted.insert(parname).second) {
                     const std::string apName = distName + "_asympow_" + sampleName + "_" + parname;
                     auto *kLo = new RooConstVar((apName + "_kappaLo").c_str(), "", normsys_vals[i].first);
                     auto *kHi = new RooConstVar((apName + "_kappaHi").c_str(), "", normsys_vals[i].second);
@@ -2053,10 +2080,13 @@ public:
 
         } // end samples
 
-        RooAddPdf * sum = new RooAddPdf(distName.c_str(), distName.c_str(), summand_list, coeff_list);
+        // The channel itself; wrapped below into RooProdPdf(distName) with its modifiers' constraints, if any.
+        const std::string coreName = CombineHS3::channelCoreName(elem);
+        RooAddPdf * sum = new RooAddPdf(coreName.c_str(), distName.c_str(), summand_list, coeff_list);
         tool->workspace()->import(*sum, RooFit::RecycleConflictNodes());
-        sum = dynamic_cast<RooAddPdf*>(tool->workspace()->function(distName.c_str()));
-        if (!sum) throw std::runtime_error("Sum of FastVerticalInterpHistPdf2 importer: failed to import Sum of FastVerticalInterpHistPdf2 '" + distName + "'");
+        sum = dynamic_cast<RooAddPdf*>(tool->workspace()->pdf(coreName.c_str()));
+        if (!sum) throw std::runtime_error("Sum of FastVerticalInterpHistPdf2 importer: failed to import Sum of FastVerticalInterpHistPdf2 '" + coreName + "'");
+        CombineHS3::wrapChannelInConstraints(tool, elem);
         return true;
         
     } //end import

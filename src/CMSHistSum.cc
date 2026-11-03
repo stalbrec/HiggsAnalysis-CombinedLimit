@@ -1212,6 +1212,7 @@ bool tryExportHistFactoryFromPropagator(RooJSONFactoryWSTool* tool, const CMSHis
 
 #include "RooRealSumPdf.h"
 #include "RooProdPdf.h"
+#include "../interface/CombineHS3Channel.h"
 
 const CMSHistSum* getCMSHistSum(const RooRealSumPdf* pdf){
   CMSHistSum* sum = 0;
@@ -1334,6 +1335,23 @@ public:
    }
 };
 
+/// RooProdPdf(<name>, [<name>_model, constraints]) as built by Combine's histfactory_dist
+/// importers: the histfactory_dist of the channel, whose modifiers name these constraints.
+class CombineConstrainedChannelStreamer : public RooFit::JSONIO::Exporter {
+public:
+   bool autoExportDependants() const override { return false; }
+   std::string const &key() const override
+   {
+      static const std::string keystring = "histfactory_dist";
+      return keystring;
+   }
+   bool exportObject(RooJSONFactoryWSTool *tool, const RooAbsArg *p, JSONNode &elem) const override
+   {
+      auto const *prod = dynamic_cast<const RooProdPdf *>(p);
+      return prod && CombineHS3::exportConstrainedChannel(tool, *prod, elem);
+   }
+};
+
 #include "static_execute.h"
 
 STATIC_EXECUTE([]() {
@@ -1341,6 +1359,7 @@ STATIC_EXECUTE([]() {
   
   registerExporter<CMSHistSumStreamer_SumPdf>(RooRealSumPdf::Class(), true);
   registerExporter<CMSHistSumStreamer_ProdPdf>(RooProdPdf::Class(), true);
+  registerExporter<CombineConstrainedChannelStreamer>(RooProdPdf::Class(), true); // ahead of the one above
   registerExporter<CMSHistSumStreamer_CMSHistSum>("CMSHistSum", false);    
  });
 
@@ -1734,8 +1753,11 @@ public:
       pdfFuncs.add(*sum);
       pdfCoeffs.add(*ONE);
       
-      auto *pdf = new RooRealSumPdf(distName.c_str(), distName.c_str(), pdfFuncs, pdfCoeffs, true /*extended*/);
+      // The channel itself; wrapped below into RooProdPdf(distName) with its modifiers' constraints, if any.
+      const std::string coreName = CombineHS3::channelCoreName(elem);
+      auto *pdf = new RooRealSumPdf(coreName.c_str(), distName.c_str(), pdfFuncs, pdfCoeffs, true /*extended*/);
       tool->workspace()->import(*pdf, RooFit::RecycleConflictNodes());
+      CombineHS3::wrapChannelInConstraints(tool, elem);
 
       return true;
    }
