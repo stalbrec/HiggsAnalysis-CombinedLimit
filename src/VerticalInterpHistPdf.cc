@@ -899,6 +899,17 @@ void FastVerticalInterpHistPdf2::setActiveBins(unsigned int bins) {
   //printf("Setting the number of active bins to be %d/%d for %s\n", bins, _cacheNominal.fullsize(), GetName());
 }
 
+void FastVerticalInterpHistPdf2::keepInputScale() {
+  assert(_smoothAlgo >= 0 && _inputNominal.size() > 0 && _inputMorphs.size() == _morphs.size());
+  _cacheNominal = _inputNominal;
+  for (unsigned i = 0; i < _morphs.size(); ++i) {
+    FastHisto hi = _inputMorphs[i].first, lo = _inputMorphs[i].second;
+    initMorph(_morphs[i], _cacheNominal, lo, hi);
+  }
+  _cache = _cacheNominal;
+  _sentry.setValueDirty();
+}
+
 void FastVerticalInterpHistPdf2::initNominal(TObject *templ) {
     TH1 *hist = dynamic_cast<TH1*>(templ);
     if (hist) {
@@ -1534,6 +1545,15 @@ static std::vector<double> croppedHead(FastHisto const &nominal, int nBins, doub
     return out;
 }
 
+// Sum of a template's first n bins, in the same order wherever it is computed, so that the
+// exporter's 1/S and the importer's check of it see the same S.
+static double sampleSum(double const *values, int n)
+{
+    double sum = 0.;
+    for (int i = 0; i < n; ++i) sum += values[i];
+    return sum;
+}
+
 bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const RooAddPdf *sum, JSONNode &elem){
     auto summands = sum->pdfList();
     const unsigned nProcs = summands.getSize();
@@ -1608,6 +1628,7 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const RooAddPdf *sum, JSON
 
         auto &dataNode = s["data"].set_map();
         double yieldScale = 1.;
+        double shapeSum = 1.;
         if (int(nominal.size()) > nBins) {
             // unmorphed, with active bins beyond the axis (activeBins() declines the other case)
             auto const head = croppedHead(nominal, nBins, yieldScale);
@@ -1617,9 +1638,23 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const RooAddPdf *sum, JSON
             auto const &input = fvih->inputNominal();
             auto const &contents = input.fullsize() == unsigned(nBins) ? input.Values() : nominal.Values();
             RooJSONFactoryWSTool::exportArray(nBins, contents.data(), dataNode["contents"]);
+            shapeSum = sampleSum(contents.data(), nBins);
         }
 
         auto &mods = s["modifiers"].set_seq();
+
+        // setActiveBins crops a nominal with negative bins to 1e-9 without renormalizing it, so it
+        // sums to S > 1, its morphs stay relative to the uncropped shape (hi/lo below sum to S as
+        // well), and syncTotal() applies the 1e-9 floor on that scale before it normalizes. The
+        // templates are written on that scale, with a literal normfactor 1/S: the histfactory_dist
+        // is then exactly coefficient * (nominal + morph) / S, and the importer rebuilds the same
+        // object (keepInputScale()), floor included.
+        if (std::abs(shapeSum - 1.) > 1e-6) {
+            auto &m = mods.append_child().set_map();
+            m["name"] << sampleName + "_shape_norm";
+            m["parameter"] << 1. / shapeSum;
+            m["type"] << "normfactor";
+        }
 
         ctx.sampleName = sampleName;
         ctx.sampleConstraints.clear();
@@ -1768,23 +1803,44 @@ public:
 
 };
 
-// True if every sample's nominal contents and every histosys hi/lo template sums to 1. The
-// tolerance only has to separate normalized shapes from templates in events; this file's exporter
-// can be off by the 1e-9 crop floor in empty bins (3e-8 for part4's 31-bin templates).
+// The literal normfactor 1/S the exporter writes for a sample whose nominal sums to S != 1 (a nominal
+// cropped by setActiveBins, see tryExportHistFactory), or nullptr.
+RooFit::Detail::JSONNode const *shapeNormModifier(RooFit::Detail::JSONNode const &sample)
+{
+    auto const *mods = sample.find("modifiers");
+    if (!mods) return nullptr;
+    const std::string name = sample["name"].val() + "_shape_norm";
+    for (auto const &m : mods->children()) {
+        if (m["type"].val() == "normfactor" && m["name"].val() == name) return &m;
+    }
+    return nullptr;
+}
+
+// True if, for every sample, the nominal contents and every histosys hi/lo template sum to 1, or
+// all to the same S with the sample's "<sample>_shape_norm" normfactor equal to 1/S. The tolerance
+// only has to separate normalized shapes from templates in events; this file's exporter can be off
+// by the 1e-9 crop floor in empty bins (3e-8 for part4's 31-bin templates).
 bool allTemplatesNormalized(RooFit::Detail::JSONNode const &elem)
 {
-    auto normalized = [](RooFit::Detail::JSONNode const &contents) {
+    auto sumOf = [](RooFit::Detail::JSONNode const &contents) {
         std::vector<double> v;
         for (auto const &c : contents.children()) v.push_back(c.val_double());
-        double sum = 0.;
-        for (double x : v) sum += x;
-        return std::abs(sum - 1.) <= 1e-6;
+        return sampleSum(v.data(), v.size());
     };
     auto const *samples = elem.find("samples");
     if (!samples) return false;
     for (auto const &s : samples->children()) {
         auto const *contents = s.find("data", "contents");
-        if (!contents || !normalized(*contents)) return false;
+        if (!contents) return false;
+        double norm = 1.;
+        if (auto const *m = shapeNormModifier(s)) {
+            double v = 0.;
+            if (!parse_double((*m)["parameter"].val(), v)) return false;
+            norm = sumOf(*contents);
+            if (std::abs((*m)["parameter"].val_double() * norm - 1.) > 1e-12) return false;
+        }
+        auto normalized = [&](RooFit::Detail::JSONNode const &c) { return std::abs(sumOf(c) / norm - 1.) <= 1e-6; };
+        if (!normalized(*contents)) return false;
         if (auto const *mods = s.find("modifiers")) {
             for (auto const &m : mods->children()) {
                 if (m["type"].val() != "histosys") continue;
@@ -1859,13 +1915,17 @@ public:
             // the yield half of a `shape` systematic and gets rebuilt as a standalone AsymPow below.
             std::set<std::string> histosys_par_names;
             double norm_nom = 1.;
+            const bool keepScale = shapeNormModifier(s) != nullptr;
 
             if (s.has_child("modifiers")) {
                 for (const auto& m: s["modifiers"].children()) {
                     const std::string mtype = m["type"].val();
                     const std::string mname = m["name"].val();
 
-                    if (mtype == "normfactor"){
+                    if (keepScale && mtype == "normfactor" && mname == sampleName + "_shape_norm") {
+                        // 1/S of a nominal kept on its own scale: the FastVerticalInterpHistPdf2
+                        // normalizes itself (keepInputScale() below), so it is not part of the yield.
+                    } else if (mtype == "normfactor"){
                         double numeric = 1.;
                         if(parse_double(m["parameter"].val(), numeric)){
                             // A normfactor whose "parameter" is a literal number is a plain
@@ -1929,6 +1989,7 @@ public:
             } // end modifiers safe
             std::string summand_name = distName + "_" +sampleName; 
             FastVerticalInterpHistPdf2 * fvih = new FastVerticalInterpHistPdf2(summand_name.c_str(),summand_name.c_str(), *x, histosys_funcs, histosys_coeff);
+            if (keepScale) fvih->keepInputScale();
             fvih->setStringAttribute("combine.process", sampleName.c_str());
             summand_list.add(*fvih);
 

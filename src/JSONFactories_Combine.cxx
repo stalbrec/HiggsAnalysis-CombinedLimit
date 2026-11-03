@@ -217,6 +217,7 @@ void exportNormSys(RooJSONFactoryWSTool *tool, JSONNode &mods, RooAbsArg const &
    tool->queueExport(theta);
 }
 
+// single bin counting experiment exporter
 bool tryExportCountingHistFactory(RooJSONFactoryWSTool *tool, const RooPoisson *pois, JSONNode &elem)
 {
    auto const *x = dynamic_cast<RooRealVar const *>(&pois->getX());

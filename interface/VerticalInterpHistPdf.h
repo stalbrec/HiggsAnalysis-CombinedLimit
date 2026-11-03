@@ -337,6 +337,12 @@ public:
   FastHisto const &inputNominal() const { return _inputNominal; }
   std::vector<std::pair<FastHisto, FastHisto>> const &inputMorphs() const { return _inputMorphs; }
 
+  /// For the HS3 importer: rebuild the nominal and the morphs from the input templates on the
+  /// scale they were passed in (all summing to the same S), instead of normalized. This is the state
+  /// setActiveBins leaves behind when it crops a nominal with negative bins (sum S > 1, 1e-9 floor
+  /// on that scale); the result is normalized in syncTotal() either way.
+  void keepInputScale();
+
   friend class FastVerticalInterpHistPdf2V;
 protected:
   RooRealProxy   _x;
