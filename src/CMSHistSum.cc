@@ -45,7 +45,8 @@ CMSHistSum::CMSHistSum(const char* name,
       initialized_(false),
       analytic_bb_(false),
       fast_mode_(0),
-      external_morphs_("external_morphs", "", this) {
+      external_morphs_("external_morphs", "", this),
+      addpars_("addpars", "", this) {
 
   n_procs_ = funcs.getSize();
   assert(n_procs_ == coeffs.getSize());
@@ -203,7 +204,12 @@ CMSHistSum::CMSHistSum(
       initialized_(false),
       fast_mode_(0),
       external_morphs_("external_morphs", this, other.external_morphs_),
-      external_morph_indices_(other.external_morph_indices_)
+      external_morph_indices_(other.external_morph_indices_),
+      addpars_("addpars", this, other.addpars_),
+      addbins_(other.addbins_),
+      addscale_(other.addscale_),
+      addsample_(other.addsample_),
+      addmodifier_(other.addmodifier_)
 {
   // removed the initialize call here
   // calling initialize here can lead to stale pointers, as a call to RedirectServers such as during a RooWorkspace import
@@ -262,6 +268,7 @@ void CMSHistSum::initialize() const {
   sentry_.addVars(morphpars_);
   sentry_.addVars(coeffpars_);
   binsentry_.addVars(binpars_);
+  binsentry_.addVars(addpars_);
 
   for (const auto* morph : external_morphs_) {
     RooArgSet* deps = morph->getParameters({*x_});
@@ -423,6 +430,12 @@ void CMSHistSum::updateCache() const {
     #if HFVERBOSE > 0
       std::cout << "Done assigning bin shifts\n";
     #endif
+    if (addpars_.getSize()) {
+      // setAdditiveBinPars() (never together with bintypes_)
+      for (unsigned j = 0; j < cache_.size(); ++j) cache_[j] = valsum_[j];
+      for (unsigned k = 0; k < addbins_.size(); ++k)
+        cache_[addbins_[k]] += static_cast<RooAbsReal const &>(addpars_[k]).getVal() * addscale_[k];
+    }
     cache_.CropUnderflows();
     binsentry_.reset();
   }
@@ -770,6 +783,37 @@ void CMSHistSum::setData(RooAbsData const& data) const {
   }
 }
 
+void CMSHistSum::setAdditiveBinPars(std::vector<RooAbsReal *> const &pars, std::vector<double> const &scale,
+                                    std::string const &sampleName, std::string const &modifierName) {
+  if (bintypes_.size() || binpars_.getSize() || addpars_.getSize())
+    throw std::runtime_error(std::string("CMSHistSum::setAdditiveBinPars: ") + GetName() + " already has bin parameters");
+  if (pars.size() != cache_.size() || scale.size() != cache_.size())
+    throw std::runtime_error(std::string("CMSHistSum::setAdditiveBinPars: ") + GetName() + ": bin count differs");
+  for (unsigned j = 0; j < pars.size(); ++j) {
+    if (!pars[j]) continue;
+    addpars_.add(*pars[j]);
+    addbins_.push_back(j);
+    addscale_.push_back(scale[j] / cache_.GetWidth(j));
+  }
+  addsample_ = sampleName;
+  addmodifier_ = modifierName;
+  initialized_ = false;
+}
+
+std::vector<RooAbsReal const *> CMSHistSum::additiveBinPars() const {
+  std::vector<RooAbsReal const *> out;
+  if (!addpars_.getSize()) return out;
+  out.assign(cache_.size(), nullptr);
+  for (unsigned k = 0; k < addbins_.size(); ++k) out[addbins_[k]] = static_cast<RooAbsReal const *>(addpars_.at(k));
+  return out;
+}
+
+std::vector<double> CMSHistSum::additiveBinScale() const {
+  std::vector<double> out(cache_.size(), 0.);
+  for (unsigned k = 0; k < addbins_.size(); ++k) out[addbins_[k]] = addscale_[k] * cache_.GetWidth(addbins_[k]);
+  return out;
+}
+
 void CMSHistSum::EnableFastVertical() {
   enable_fast_vertical_ = true;
 }
@@ -800,6 +844,8 @@ ClassImp(CMSHistSum)
 
 #include "RooFitHS3/RooJSONFactoryWSTool.h"
 #include "RooFitHS3/JSONIO.h"
+#include "../interface/CombineHS3BBLite.h"
+#include "../interface/SimpleGaussianConstraint.h"
 
 using RooFit::Detail::JSONNode;
 
@@ -913,6 +959,27 @@ void exportCoeffModifier(RooJSONFactoryWSTool* tool, JSONNode& mods, RooAbsArg c
   }
 }
 
+// The reparameterized autoMCStats term (CombineHS3BBLite.h): a sample with contents `scale` and one
+// unconstrained shapefactor, n_j += scale_j * pars_j. Bins without a parameter cannot be written yet.
+void exportAdditiveSample(RooJSONFactoryWSTool* tool, JSONNode& samples, std::string const& sampleName,
+                          std::string const& modifierName, std::vector<RooAbsReal const*> const& pars,
+                          std::vector<double> const& scale) {
+  for (auto const* p : pars) {
+    if (!p) RooJSONFactoryWSTool::error("shapefactor sample '" + sampleName + "': a bin has no parameter");
+  }
+  auto &s = samples.append_child().set_map();
+  s["name"] << sampleName;
+  RooJSONFactoryWSTool::exportArray(scale.size(), scale.data(), s["data"].set_map()["contents"]);
+  auto &m = s["modifiers"].set_seq().append_child().set_map();
+  m["name"] << modifierName;
+  auto &pnode = m["parameters"].set_seq();
+  for (auto const* p : pars) {
+    pnode.append_child() << p->GetName();
+    tool->queueExport(*p);
+  }
+  m["type"] << "shapefactor";
+}
+
 bool tryExportHistFactory(RooJSONFactoryWSTool* tool, const CMSHistSum* hs, JSONNode& elem) {
   // if we have external morphs injected, you probably want to error out for now.
   if (hs->hasExternalMorphs()) {  // optional accessor; otherwise remove and always allow
@@ -1008,6 +1075,12 @@ bool tryExportHistFactory(RooJSONFactoryWSTool* tool, const CMSHistSum* hs, JSON
         m["name"] << "mcstat";
         m["type"] << "staterror";
       }
+    }
+
+    auto addPars = hs->additiveBinPars();
+    if (!addPars.empty()) {
+      exportAdditiveSample(tool, samples, hs->additiveSampleName(), hs->additiveModifierName(), addPars,
+                           hs->additiveBinScale());
     }
     
     return true;
@@ -1122,6 +1195,8 @@ bool tryExportHistFactoryFromPropagator(RooJSONFactoryWSTool* tool, const CMSHis
 
   auto &samples = elem["samples"].set_seq();
   int nBins = 0;
+  auto const *bb = CombineHS3::BBLiteExport::active();
+  std::vector<RooRealVar *> const *bbYs = bb ? bb->binParameters(*prop) : nullptr;
 
   for (unsigned ip = 0; ip < nProcs; ++ip) {
     CMSHistFunc const *func = hfuncs[ip];
@@ -1196,12 +1271,30 @@ bool tryExportHistFactoryFromPropagator(RooJSONFactoryWSTool* tool, const CMSHis
     }
 
     // Staterror modifier (if errors were exported and there are bin parameters) -- same bare
-    // HistFactory-style marker tryExportHistFactory uses.
-    if (anyErr && prop->hasBinPars()) {
+    // HistFactory-style marker tryExportHistFactory uses. Not when the bin parameters are written
+    // as the `mcstat` sample below (CombineHS3BBLite.h).
+    if (anyErr && prop->hasBinPars() && !bbYs) {
       auto &m = mods.append_child().set_map();
       m["name"] << "mcstat";
       m["type"] << "staterror";
     }
+  }
+
+  if (bbYs) {
+    // One parameter per bin of the axis: bins without a term (bin type 0, or beyond the
+    // propagator's active bins) get contents 0 and borrow the nearest preceding y_j (the first one
+    // for leading bins), so they add 0 * y_j = 0.
+    std::vector<RooAbsReal const *> pars(nBins, nullptr);
+    std::vector<double> scale(nBins, 0.0);
+    for (unsigned j = 0; j < bbYs->size() && j < static_cast<unsigned>(nBins); ++j) {
+      if ((*bbYs)[j]) { pars[j] = (*bbYs)[j]; scale[j] = 1.0; }
+    }
+    RooAbsReal const *fill = nullptr;
+    for (auto const *p : pars) if (p) { fill = p; break; }
+    for (auto &p : pars) {
+      if (p) fill = p; else p = fill;
+    }
+    exportAdditiveSample(tool, samples, "mcstat", "mcstat", pars, scale);
   }
 
   ax["nbins"] << nBins;
@@ -1352,11 +1445,44 @@ public:
    }
 };
 
+/// The constraint of a reparameterized autoMCStats bin parameter x_j (CombineHS3BBLite.h):
+/// Gauss(x_In | x_j, 1) is written as gaussian_dist(x = x_In, mean = y_j / E_j, sigma = 1).
+class BBLiteConstraintStreamer : public RooFit::JSONIO::Exporter {
+public:
+   bool autoExportDependants() const override { return false; }
+   std::string const &key() const override
+   {
+      static const std::string keystring = "gaussian_dist";
+      return keystring;
+   }
+   bool exportObject(RooJSONFactoryWSTool *tool, const RooAbsArg *p, JSONNode &elem) const override
+   {
+      auto const *bb = CombineHS3::BBLiteExport::active();
+      auto const *g = dynamic_cast<const SimpleGaussianConstraint *>(p);
+      if (!bb || !g) return false;
+      RooAbsReal *mean = bb->meanFor(*g);
+      if (!mean) return false;
+      auto const *glob = dynamic_cast<RooRealVar const *>(&g->getMean());
+      if (!glob || !glob->isConstant() || !g->getSigma().isConstant() || g->getSigma().getVal() != 1.0) {
+         RooJSONFactoryWSTool::error(std::string("autoMCStats constraint '") + g->GetName() +
+                                     "' is not Gauss(x_In | x, 1) with a constant x_In");
+      }
+      elem["type"] << key();
+      elem["x"] << glob->GetName();
+      elem["mean"] << mean->GetName();
+      elem["sigma"] << 1.0;
+      tool->queueExport(*glob);
+      tool->queueExport(*mean);
+      return true;
+   }
+};
+
 #include "static_execute.h"
 
 STATIC_EXECUTE([]() {
   using namespace RooFit::JSONIO;
   
+  registerExporter<BBLiteConstraintStreamer>(SimpleGaussianConstraint::Class(), true);
   registerExporter<CMSHistSumStreamer_SumPdf>(RooRealSumPdf::Class(), true);
   registerExporter<CMSHistSumStreamer_ProdPdf>(RooProdPdf::Class(), true);
   registerExporter<CombineConstrainedChannelStreamer>(RooProdPdf::Class(), true); // ahead of the one above
@@ -1578,8 +1704,45 @@ public:
          ONE = dynamic_cast<RooAbsReal *>(tool->workspace()->arg("ONE"));
       }      
 
+      // An unconstrained shapefactor sample with no other modifiers: the reparameterized autoMCStats
+      // term (CombineHS3BBLite.h), added per bin to the process sum (CMSHistSum::setAdditiveBinPars).
+      struct Additive {
+        std::string sample, modifier;
+        std::vector<RooAbsReal *> pars;
+        std::vector<double> scale;
+      };
+      std::unique_ptr<Additive> additive;
+
       for(const auto&s:elem["samples"].children()){
 	const std::string sampleName = s["name"].val();
+
+         if (s.has_child("modifiers")) {
+            bool hasShapefactor = false;
+            for (auto const &m : s["modifiers"].children()) hasShapefactor |= m["type"].val() == "shapefactor";
+            if (hasShapefactor) {
+               auto const &mods = s["modifiers"];
+               if (mods.num_children() != 1)
+                  throw std::runtime_error("CMSHistSum importer: shapefactor on sample '" + sampleName +
+                                           "' together with other modifiers is not supported");
+               auto const &m = *mods.children().begin();
+               if (m.has_child("constraint") || m.has_child("constraints"))
+                  throw std::runtime_error("CMSHistSum importer: constrained shapefactor on sample '" + sampleName +
+                                           "' is not supported");
+               if (additive)
+                  throw std::runtime_error("CMSHistSum importer: more than one shapefactor sample in '" + distName + "'");
+               additive = std::make_unique<Additive>();
+               additive->sample = sampleName;
+               additive->modifier = m["name"].val();
+               additive->scale = readDoubleArray(s["data"]["contents"], sampleName + ".data.contents");
+               if (static_cast<int>(additive->scale.size()) != x->numBins() ||
+                   static_cast<int>(m["parameters"].num_children()) != x->numBins())
+                  throw std::runtime_error("CMSHistSum importer: shapefactor sample '" + sampleName + "' size != nbins");
+               for (auto const &par : m["parameters"].children()) {
+                  additive->pars.push_back(&getOrMakeParameter(tool, par.val(), 0.0, -7.0, 7.0));
+               }
+               continue;
+            }
+         }
 
          // data.contents (required)
          if (!s.has_child("data") || !s["data"].has_child("contents"))
@@ -1740,6 +1903,7 @@ public:
       // Construct CMSHistSum
       const std::string sumName = distName + "_cmshistsum";
       auto *sum = new CMSHistSum(sumName.c_str(), sumName.c_str(), *x, funcs, coeffs);
+      if (additive) sum->setAdditiveBinPars(additive->pars, additive->scale, additive->sample, additive->modifier);
       tool->workspace()->import(*sum, RooFit::RecycleConflictNodes());
       sum = dynamic_cast<CMSHistSum *>(tool->workspace()->function(sumName.c_str()));
       if (!sum)

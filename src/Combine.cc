@@ -451,6 +451,15 @@ void Combine::run(TString hlfFile, const std::string &dataset, double &limit, do
             // Constraints the histfactory_dist importers already put into the channels (modifier
             // `constraint`, CombineHS3Channel.h) are part of the model and must not be added twice.
             std::unique_ptr<RooArgSet> modelComponents{pdf->getComponents()};
+            // Nor the constraints that only another model's channels use (e.g. the b-only model's own
+            // autoMCStats constraints, CombineHS3BBLite.h): they are not part of this model.
+            RooArgSet otherComponents;
+            for (RooAbsArg *arg : w->allPdfs()) {
+              auto *other = dynamic_cast<RooSimultaneous *>(arg);
+              if (!other || other == pdf) continue;
+              std::unique_ptr<RooArgSet> comps{other->getComponents()};
+              otherComponents.add(*comps, /*silent=*/true);
+            }
             for (RooAbsArg *arg : w->allPdfs()) {
               auto *cpdf = dynamic_cast<RooAbsPdf *>(arg);
 
@@ -462,6 +471,9 @@ void Combine::run(TString hlfFile, const std::string &dataset, double &limit, do
 
               // skip if a channel already contains it
               if (modelComponents->find(*cpdf)) continue;
+
+              // skip if only another model contains it
+              if (otherComponents.find(*cpdf)) continue;
 
               extraConstrs.add(*cpdf);
             }

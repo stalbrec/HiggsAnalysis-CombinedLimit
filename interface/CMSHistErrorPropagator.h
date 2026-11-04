@@ -48,6 +48,10 @@ public:
 
   /// True if setupBinPars created Barlow-Beeston-lite parameters (autoMCStats threshold >= 0)
   bool hasBinPars() const { return binpars_.getSize() > 0; }
+  /// Barlow-Beeston-lite bin types per bin and process, as set up by setupBinPars() (read-only, HS3 export).
+  std::vector<std::vector<unsigned>> const &binTypes() const { return bintypes_; }
+  /// The bin parameters, in the order setupBinPars() created them (bin-major, then process).
+  RooArgList const &binParList() const { return binpars_; }
 
   std::unique_ptr<RooArgSet> getSentryArgs() const;
 

@@ -1,6 +1,7 @@
 #include "../interface/RooSimultaneousOpt.h"
 #include "../interface/CachingNLL.h"
 #include "../interface/Combine.h"
+#include "../interface/CombineHS3BBLite.h"
 
 #include <RooCmdConfig.h>
 #include <RooWorkspace.h>
@@ -121,6 +122,15 @@ RooSimultaneousOpt::exportJSON(RooWorkspace &ws, const std::string &fileName)
         std::vector<Detached> &d;
         ~Restore() { for (auto &x : d) x.opt->_extraConstraints.add(x.constraints); }
     } restore{detached};
+
+    // autoMCStats bin parameters as y_j (CombineHS3BBLite.h), for the duration of the export
+    std::unique_ptr<CombineHS3::BBLiteExport> bblite;
+    try {
+        bblite = std::make_unique<CombineHS3::BBLiteExport>(ws);
+    } catch (std::exception const &e) {
+        std::cerr << "RooSimultaneousOpt::exportJSON: " << e.what() << "\n";
+        return false;
+    }
 
     RooJSONFactoryWSTool tool(ws);
     if (masks.empty()) return tool.exportJSON(fileName);

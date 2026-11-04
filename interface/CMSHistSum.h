@@ -174,6 +174,21 @@ public:
 
   /// True if setupBinPars created Barlow-Beeston-lite parameters (autoMCStats threshold >= 0)
   bool hasBinPars() const { return binpars_.getSize() > 0; }
+  /// Barlow-Beeston-lite bin types per bin and process (read-only, HS3 export).
+  std::vector<std::vector<unsigned>> const &binTypes() const { return bintypes_; }
+  RooArgList const &binParList() const { return binpars_; }
+  /// HS3 import of an unconstrained `shapefactor` sample with no other modifiers (the
+  /// reparameterized autoMCStats term): bin j gets scale[j] * pars[j] (in events) added to the
+  /// process sum, before the final CropUnderflows, for every bin with a non-null entry in `pars`.
+  /// Not combined with setupBinPars(). Only before the first evaluation.
+  void setAdditiveBinPars(std::vector<RooAbsReal *> const &pars, std::vector<double> const &scale,
+                          std::string const &sampleName, std::string const &modifierName);
+  /// Bin j's parameter from setAdditiveBinPars(), or nullptr; empty if none were set.
+  std::vector<RooAbsReal const *> additiveBinPars() const;
+  /// Bin j's scale (in events) from setAdditiveBinPars().
+  std::vector<double> additiveBinScale() const;
+  std::string const &additiveSampleName() const { return addsample_; }
+  std::string const &additiveModifierName() const { return addmodifier_; }
 
   /// Per-bin MC stat errors for a process
   FastTemplate binErrors(unsigned iproc, bool density=true) const
@@ -256,6 +271,13 @@ protected:
   RooListProxy external_morphs_;
   std::vector<int> external_morph_indices_;
 
+  // setAdditiveBinPars(): addpars_[k] acts on bin addbins_[k] with density scale addscale_[k]
+  RooListProxy addpars_;
+  std::vector<int> addbins_;
+  std::vector<double> addscale_;
+  std::string addsample_;
+  std::string addmodifier_;
+
   inline int& morphField(int const& ip, int const& iv) {
     return vmorph_fields_[ip * n_morphs_ + iv];
   }
@@ -268,7 +290,7 @@ protected:
 
 
  private:
-  ClassDefOverride(CMSHistSum,2)
+  ClassDefOverride(CMSHistSum,3)
 };
 
 #endif
