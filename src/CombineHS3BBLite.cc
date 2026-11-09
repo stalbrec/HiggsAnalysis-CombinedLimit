@@ -2,6 +2,7 @@
 
 #include "../interface/AsymPow.h"
 #include "../interface/CMSHistErrorPropagator.h"
+#include "../interface/CMSHistSum.h"
 #include "../interface/CMSHistFunc.h"
 #include "../interface/ProcessNormalization.h"
 #include "../interface/SimpleGaussianConstraint.h"
@@ -17,6 +18,7 @@
 #include <RooWorkspace.h>
 
 #include <cmath>
+#include <functional>
 #include <algorithm>
 #include <iomanip>
 #include <memory>
@@ -42,25 +44,39 @@ std::string literal(double v)
 struct Expr {
    std::string text;
    RooArgList deps;
+   RooWorkspace *ws = nullptr; // where the shared <theta>_asym_alpha functions go
    void addDep(RooAbsArg const &a)
    {
       if (!deps.find(a.GetName())) deps.add(a);
    }
 };
 
+template <class T>
+T *importAndGet(RooWorkspace &ws, T const &obj);
+
 /// Combine's logKappaForX (CombineMathFuncs.h) times theta, without branches: for |theta| >= 0.5
 /// the clamped polynomial is exactly +-1, so avg +- halfdiff gives logKappaHigh / -logKappaLow
-/// (up to rounding of avg +- halfdiff).
-std::string asymTerm(std::string const &theta, double logKappaLow, double logKappaHigh)
+/// (up to rounding of avg +- halfdiff). The polynomial depends on theta only: one shared function
+/// <theta>_asym_alpha per nuisance keeps the c_p expressions short (each one is JIT-compiled).
+std::string asymTerm(RooAbsArg const &th, double logKappaLow, double logKappaHigh, Expr &e)
 {
    double logKhi = logKappaHigh;
    double logKlo = -logKappaLow;
    double avg = 0.5 * (logKhi + logKlo);
    double halfdiff = 0.5 * (logKhi - logKlo);
-   std::string t = "max(-1.0,min(1.0," + theta + "+" + theta + "))";
-   std::string t2 = "(" + t + "*" + t + ")";
-   std::string alpha = "0.125*" + t + "*(" + t2 + "*(3.0*" + t2 + "-10.0)+15.0)";
-   return theta + "*(" + literal(avg) + "+" + alpha + "*" + literal(halfdiff) + ")";
+   std::string const theta = th.GetName();
+   std::string const aname = theta + "_asym_alpha";
+   RooAbsReal *alpha = e.ws->function(aname.c_str());
+   if (!alpha) {
+      std::string t = "max(-1.0,min(1.0," + theta + "+" + theta + "))";
+      std::string t2 = "(" + t + "*" + t + ")";
+      RooFormulaVar f(aname.c_str(), aname.c_str(), ("0.125*" + t + "*(" + t2 + "*(3.0*" + t2 + "-10.0)+15.0)").c_str(),
+                      RooArgList(th));
+      alpha = importAndGet(*e.ws, f);
+   }
+   e.addDep(th);
+   e.addDep(*alpha);
+   return theta + "*(" + literal(avg) + "+" + aname + "*" + literal(halfdiff) + ")";
 }
 
 /// c_p as a generic expression, mirroring the evaluation order of the Combine classes.
@@ -80,7 +96,7 @@ void coeffExpr(RooAbsArg const *c, Expr &e)
          RooAbsArg const *th = pn->asymmThetaList().at(i);
          e.addDep(*th);
          logVal += (logVal.empty() ? "" : "+") +
-                   asymTerm(th->GetName(), pn->logAsymmKappa()[i].first, pn->logAsymmKappa()[i].second);
+                   asymTerm(*th, pn->logAsymmKappa()[i].first, pn->logAsymmKappa()[i].second, e);
       }
       e.text += literal(pn->nominalValue());
       if (!logVal.empty()) e.text += "*exp(" + logVal + ")";
@@ -95,8 +111,8 @@ void coeffExpr(RooAbsArg const *c, Expr &e)
          throw std::runtime_error(std::string("HS3 autoMCStats export: AsymPow ") + ap->GetName() +
                                   " has non-constant kappas");
       e.addDep(ap->theta());
-      e.text += "exp(" + asymTerm(ap->theta().GetName(), std::log(ap->kappaLow().getVal()),
-                                  std::log(ap->kappaHigh().getVal())) + ")";
+      e.text += "exp(" + asymTerm(ap->theta(), std::log(ap->kappaLow().getVal()),
+                                  std::log(ap->kappaHigh().getVal()), e) + ")";
    } else if (auto *prod = dynamic_cast<RooProduct const *>(c)) {
       RooArgList comps = const_cast<RooProduct *>(prod)->components();
       if (comps.empty()) {
@@ -166,14 +182,58 @@ namespace CombineHS3 {
 
 BBLiteExport::BBLiteExport(RooWorkspace &ws) : previous_(gActive)
 {
-   std::vector<CMSHistErrorPropagator *> props;
+   // The objects with autoMCStats bin parameters: CMSHistErrorPropagator or CMSHistSum, read through
+   // the same accessors (errors in events; both require unit bin widths below).
+   struct Source {
+      RooAbsReal *obj;
+      std::vector<std::vector<unsigned>> const *bt;
+      RooArgList const *pars;
+      unsigned nProcs;
+      std::function<double(unsigned, unsigned)> err; // (process, bin)
+      std::function<RooAbsArg const *(unsigned)> coeff;
+      std::function<std::string(unsigned)> process;
+      std::function<double(unsigned)> width;
+   };
+   std::vector<Source> props;
    for (RooAbsArg *arg : ws.components()) {
-      if (auto *p = dynamic_cast<CMSHistErrorPropagator *>(arg); p && p->hasBinPars()) props.push_back(p);
+      if (auto *p = dynamic_cast<CMSHistErrorPropagator *>(arg); p && p->hasBinPars()) {
+         RooArgList const &funcs = p->funcList();
+         std::vector<CMSHistFunc const *> hf(funcs.getSize());
+         for (int ip = 0; ip < funcs.getSize(); ++ip) {
+            hf[ip] = dynamic_cast<CMSHistFunc const *>(funcs.at(ip));
+            if (!hf[ip])
+               throw std::runtime_error(std::string("HS3 autoMCStats export: ") + p->GetName() + ": not a CMSHistFunc");
+         }
+         for (unsigned j = 0; j < p->binTypes().size(); ++j) {
+            for (unsigned t : p->binTypes()[j])
+               if (t == 2 || t == 3)
+                  throw std::runtime_error(std::string("HS3 autoMCStats export: ") + p->GetName() + " bin " +
+                                           std::to_string(j) +
+                                           " uses per-process bin parameters (types 2/3), written for CMSHistSum only");
+         }
+         p->getVal(); // fills the caches
+         props.push_back({p, &p->binTypes(), &p->binParList(), static_cast<unsigned>(funcs.getSize()),
+                          [hf](unsigned ip, unsigned j) { return hf[ip]->errors()[j]; },
+                          [p](unsigned ip) -> RooAbsArg const * { return p->coefList().at(ip); },
+                          [hf](unsigned ip) { return processName(*hf[ip]); },
+                          [p](unsigned j) { return p->cache().GetWidth(j); }});
+      } else if (auto *h = dynamic_cast<CMSHistSum *>(arg); h && h->hasBinPars()) {
+         h->getVal();
+         props.push_back({h, &h->binTypes(), &h->binParList(), h->nProcs(),
+                          [h](unsigned ip, unsigned j) { return h->binErrors(ip, true)[j]; },
+                          [h](unsigned ip) -> RooAbsArg const * { return h->coeffAt(ip); },
+                          [h](unsigned ip) {
+                             RooAbsReal const *c = h->coeffAt(ip);
+                             return c->stringAttributes().count("combine.process") ? c->getStringAttribute("combine.process")
+                                                                                   : std::string(c->GetName());
+                          },
+                          [h](unsigned j) { return h->binWidth(j); }});
+      }
    }
    // The s+b model's propagators first: they define y_j and keep the plain names.
    if (auto *mc = dynamic_cast<RooStats::ModelConfig *>(ws.genobj("ModelConfig")); mc && mc->GetPdf()) {
       std::unique_ptr<RooArgSet> comps{mc->GetPdf()->getComponents()};
-      std::stable_partition(props.begin(), props.end(), [&](auto *p) { return comps->find(*p) != nullptr; });
+      std::stable_partition(props.begin(), props.end(), [&](auto const &p) { return comps->find(*p.obj) != nullptr; });
    }
 
    std::map<std::string, RooRealVar *> xToY;
@@ -183,38 +243,30 @@ BBLiteExport::BBLiteExport(RooWorkspace &ws) : previous_(gActive)
    std::map<std::string, std::map<std::string, RooAbsPdf *>> substitutes; // propagator -> constraint -> its own copy
    std::map<std::string, std::string> tagOf; // propagator -> suffix of its own copies
 
-   for (CMSHistErrorPropagator *prop : props) {
+   for (Source const &src : props) {
+      RooAbsReal *prop = src.obj;
       std::string const pname = prop->GetName();
-      auto const &bt = prop->binTypes();
-      RooArgList const &pars = prop->binParList();
-      RooArgList const &funcs = prop->funcList();
-      RooArgList const &coeffs = prop->coefList();
-      prop->getVal(); // fills the caches
-      FastHisto const &cache = prop->cache();
+      auto const &bt = *src.bt;
+      RooArgList const &pars = *src.pars;
+      // Bins with one parameter for the total (type 1) are written here; per-process bins (types
+      // 2, 3, 4) keep their parameters and are written by the histfactory exporter.
       bool anyType1 = false;
-      for (unsigned j = 0; j < bt.size(); ++j) {
-         if (bt[j].size() != 1 || (bt[j][0] != 0 && bt[j][0] != 1))
-            throw std::runtime_error("HS3 autoMCStats export: " + pname + " bin " + std::to_string(j) +
-                                     " uses per-process bin parameters (types 2/3), not written yet");
-         anyType1 |= bt[j][0] == 1;
-      }
+      for (unsigned j = 0; j < bt.size(); ++j) anyType1 |= bt[j][0] == 1;
       if (!anyType1) continue;
       for (unsigned j = 0; j < bt.size(); ++j) {
-         if (cache.GetWidth(j) != 1.0)
+         if (src.width(j) != 1.0)
             throw std::runtime_error("HS3 autoMCStats export: " + pname + " has bins of width != 1");
       }
 
       // c_p for every process that has a non-zero error somewhere
-      std::vector<std::string> cName(funcs.getSize());
-      std::vector<CMSHistFunc const *> hf(funcs.getSize());
-      for (int ip = 0; ip < funcs.getSize(); ++ip) {
-         hf[ip] = dynamic_cast<CMSHistFunc const *>(funcs.at(ip));
-         if (!hf[ip]) throw std::runtime_error("HS3 autoMCStats export: " + pname + ": not a CMSHistFunc");
-         bool anyErr = false;
-         for (unsigned j = 0; j < bt.size(); ++j) anyErr |= hf[ip]->errors()[j] != 0.;
+      std::vector<std::string> cName(src.nProcs);
+      for (unsigned ip = 0; ip < src.nProcs; ++ip) {
+         bool anyErr = false; // in a type-1 bin
+         for (unsigned j = 0; j < bt.size(); ++j) anyErr |= bt[j][0] == 1 && src.err(ip, j) != 0.;
          if (!anyErr) continue;
          Expr e;
-         coeffExpr(coeffs.at(ip), e);
+         e.ws = &ws;
+         coeffExpr(src.coeff(ip), e);
          if (e.deps.empty()) {
             cName[ip] = "(" + e.text + ")";
          } else if (e.deps.getSize() == 1 && e.text == e.deps.at(0)->GetName()) {
@@ -222,7 +274,7 @@ BBLiteExport::BBLiteExport(RooWorkspace &ws) : previous_(gActive)
          } else if (auto it = normByExpr.find(e.text); it != normByExpr.end()) {
             cName[ip] = it->second;
          } else {
-            std::string const name = pname + "_norm_" + processName(*hf[ip]);
+            std::string const name = pname + "_norm_" + src.process(ip);
             RooFormulaVar f(name.c_str(), name.c_str(), e.text.c_str(), e.deps);
             cName[ip] = normByExpr[e.text] = importAndGet(ws, f)->GetName();
          }
@@ -230,16 +282,21 @@ BBLiteExport::BBLiteExport(RooWorkspace &ws) : previous_(gActive)
 
       std::vector<RooRealVar *> &ys = ys_[pname];
       ys.assign(bt.size(), nullptr);
+      std::vector<RooAbsPdf *> &cons = cons_[pname];
+      cons.assign(bt.size(), nullptr);
       for (unsigned j = 0, r = 0; j < bt.size(); ++j) {
-         if (bt[j][0] == 0) continue; // no term, no parameter
+         if (bt[j][0] != 1) { // no term, or per-process parameters
+            for (unsigned t : bt[j]) r += t >= 1 && t < 4;
+            continue;
+         }
          auto *x = dynamic_cast<RooRealVar *>(pars.at(r++));
          if (!x) throw std::runtime_error("HS3 autoMCStats export: " + pname + ": bin parameter is not a RooRealVar");
          std::string const xname = x->GetName();
          // E_j, summed as CMSHistErrorPropagator::updateCache does (vectorized::mul_add_sqr)
          std::string sum;
          RooArgList eDeps;
-         for (int ip = 0; ip < funcs.getSize(); ++ip) {
-            double err = hf[ip]->errors()[j];
+         for (unsigned ip = 0; ip < src.nProcs; ++ip) {
+            double err = src.err(ip, j);
             if (err == 0.) continue;
             std::string const c = cName[ip];
             sum += (sum.empty() ? "" : "+") + c + "*" + c + "*" + literal(err) + "*" + literal(err);
@@ -253,6 +310,7 @@ BBLiteExport::BBLiteExport(RooWorkspace &ws) : previous_(gActive)
          }
 
          auto yIt = xToY.find(xname);
+         if (!constraints.empty()) cons[j] = constraints.front();
          if (yIt != xToY.end() && eExprOf[xname] == sum) { // same E_j as where y_j was defined
             ys[j] = yIt->second;
             continue;
@@ -298,6 +356,7 @@ BBLiteExport::BBLiteExport(RooWorkspace &ws) : previous_(gActive)
                RooAbsPdf *wsCopy = importAndGet(ws, copy);
                means_[cname] = wsMean;
                substitutes[pname][g->GetName()] = wsCopy;
+               if (g == constraints.front()) cons[j] = wsCopy;
                if (!tagOf.emplace(pname, tag).second && tagOf[pname] != tag)
                   throw std::runtime_error("HS3 autoMCStats export: " + pname + " shares bin parameters with two models");
             }
@@ -372,6 +431,12 @@ std::vector<RooRealVar *> const *BBLiteExport::binParameters(RooAbsArg const &pr
 {
    auto it = ys_.find(prop.GetName());
    return it == ys_.end() ? nullptr : &it->second;
+}
+
+std::vector<RooAbsPdf *> const *BBLiteExport::binConstraints(RooAbsArg const &prop) const
+{
+   auto it = cons_.find(prop.GetName());
+   return it == cons_.end() ? nullptr : &it->second;
 }
 
 RooAbsReal *BBLiteExport::meanFor(RooAbsArg const &constraint) const

@@ -180,9 +180,14 @@ public:
   /// HS3 import of an unconstrained `shapefactor` sample with no other modifiers (the
   /// reparameterized autoMCStats term): bin j gets scale[j] * pars[j] (in events) added to the
   /// process sum, before the final CropUnderflows, for every bin with a non-null entry in `pars`.
-  /// Not combined with setupBinPars(). Only before the first evaluation.
+  /// Not combined with setupBinPars(); only in bins without setImportedBinPars() parameters.
+  /// Only before the first evaluation.
   void setAdditiveBinPars(std::vector<RooAbsReal *> const &pars, std::vector<double> const &scale,
                           std::string const &sampleName, std::string const &modifierName);
+  /// HS3 import of the per-process autoMCStats bin parameters (types 2, 3; 4 = none): `types` as
+  /// binTypes() ({0} for bins without them), `pars` in binParList() order (bin, then process).
+  /// Only before the first evaluation.
+  void setImportedBinPars(std::vector<std::vector<unsigned>> const &types, RooArgList const &pars);
   /// Bin j's parameter from setAdditiveBinPars(), or nullptr; empty if none were set.
   std::vector<RooAbsReal const *> additiveBinPars() const;
   /// Bin j's scale (in events) from setAdditiveBinPars().

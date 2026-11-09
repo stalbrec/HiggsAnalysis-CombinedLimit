@@ -1,8 +1,11 @@
 #ifndef HiggsAnalysis_CombinedLimit_CombineHS3BBLite_h
 #define HiggsAnalysis_CombinedLimit_CombineHS3BBLite_h
 
-// HS3 export of autoMCStats (Barlow-Beeston-lite) bin parameters of CMSHistErrorPropagator
-// (Decision 1 with point 6 (y_j) and point 7 option (a), DECISIONS.md 2026-11-03).
+// HS3 export of autoMCStats (Barlow-Beeston-lite) bin parameters of CMSHistErrorPropagator and
+// CMSHistSum (Decision 1 with point 6 (y_j) and point 7 option (a), DECISIONS.md 2026-11-03).
+// This covers the bins with one parameter for the total (type 1). CMSHistSum's per-process bins
+// (types 2, 3; DECISIONS.md 2026-11-04 hig20013) keep their parameters and are written by its
+// histfactory exporter (CMSHistSum.cc, exportPerProcessBinSamples).
 //
 // Combine, bin type 1:  n_j = S_j(theta) + x_j * E_j(theta),  x_j ~ Gauss(x_j_In | x_j, 1),
 //                       E_j(theta) = sqrt(sum_p c_p(theta)^2 e_pj^2).
@@ -29,6 +32,7 @@
 #include <vector>
 
 class RooAbsArg;
+class RooAbsPdf;
 class RooAbsReal;
 class RooArgSet;
 class RooRealVar;
@@ -40,9 +44,9 @@ class ModelConfig;
 namespace CombineHS3 {
 
 /// For the duration of an export: builds the objects above in `ws` for every
-/// CMSHistErrorPropagator with bin parameters, and swaps x_j for y_j in every ModelConfig's
-/// nuisance parameters (restored by the destructor; the new objects stay in the workspace).
-/// Throws std::runtime_error for bin types it cannot write exactly (2, 3).
+/// CMSHistErrorPropagator / CMSHistSum with type-1 bin parameters, and swaps x_j for y_j in every
+/// ModelConfig's nuisance parameters (restored by the destructor; the new objects stay in the workspace).
+/// Throws std::runtime_error for a CMSHistErrorPropagator with bin types 2/3 (not written).
 class BBLiteExport {
 public:
    explicit BBLiteExport(RooWorkspace &ws);
@@ -53,13 +57,16 @@ public:
    /// The instance of the export in progress, or nullptr.
    static BBLiteExport const *active();
 
-   /// y_j per bin of this CMSHistErrorPropagator, or nullptr if it has no reparameterized bins.
+   /// y_j per bin (nullptr for bins without a type-1 term) of this CMSHistErrorPropagator / CMSHistSum, or nullptr if it has no reparameterized bins.
    std::vector<RooRealVar *> const *binParameters(RooAbsArg const &prop) const;
+   /// The constraint of x_j per bin (as binParameters(); for a model with its own copies, the copy), or nullptr.
+   std::vector<RooAbsPdf *> const *binConstraints(RooAbsArg const &prop) const;
    /// For a constraint Gauss(x_In | x_j, 1) of a bin parameter: its mean function y_j / E_j, or nullptr.
    RooAbsReal *meanFor(RooAbsArg const &constraint) const;
 
 private:
    std::map<std::string, std::vector<RooRealVar *>> ys_; // propagator name -> y_j per bin
+   std::map<std::string, std::vector<RooAbsPdf *>> cons_; // propagator name -> constraint of x_j per bin
    std::map<std::string, RooAbsReal *> means_;           // constraint name -> mean function
    struct Redirect {
       RooAbsArg *product, *original, *replacement;
