@@ -1387,6 +1387,21 @@ struct HistFactoryExportCtx {
 };
 
 
+// DECISIONS.md 2026-11-11 item 4a: an HS3 histosys/normsys "parameter" is the name of a scalar free
+// parameter (/spec/docs/chapters/2.1.1_fundamental_distributions.md, histfactory_dist). A coefficient
+// that is not a plain RooRealVar (e.g. RooProduct(alpha, c)) has no exact representation there, so
+// the export stops instead of writing the compound node's name. Mirrored in VerticalInterpHistPdf.cc,
+// CMSHistSum.cc and JSONFactories_Combine.cxx.
+static void requirePlainModifierParameter(RooAbsArg const &par, std::string const &pdfName,
+                                          std::string const &sampleName, const char *modType)
+{
+   if (dynamic_cast<RooRealVar const *>(&par)) return;
+   RooJSONFactoryWSTool::error(std::string("HS3 export of pdf '") + pdfName + "', sample '" + sampleName + "': " +
+                               modType + " coefficient '" + par.GetName() + "' is a " + par.ClassName() +
+                               ", not a plain RooRealVar; an HS3 modifier \"parameter\" must be a scalar free "
+                               "parameter (see OPEN_ISSUES.md, scaled normsys/histosys coefficients).");
+}
+
 std::string resolveConstraintPdfName(RooJSONFactoryWSTool *tool, HistFactoryExportCtx &ctx, RooAbsArg const &theta)
 {
    const std::string thetaName(theta.GetName());
@@ -1441,6 +1456,7 @@ void registerConstraint(HistFactoryExportCtx &ctx, std::string const &param, std
 void exportNormSys(RooJSONFactoryWSTool *tool, HistFactoryExportCtx &ctx, JSONNode &mods, RooAbsArg const &theta,
                    double kappaLo, double kappaHi)
 {
+   requirePlainModifierParameter(theta, ctx.channel ? ctx.channel->GetName() : "", ctx.sampleName, "normsys");
    const std::string constraint = resolveConstraintPdfName(tool, ctx, theta);
    registerConstraint(ctx, theta.GetName(), constraint);
 
@@ -1668,6 +1684,7 @@ bool tryExportHistFactory(RooJSONFactoryWSTool *tool, const RooAddPdf *sum, JSON
 
         for(unsigned icoeff=0; icoeff < fvih->coefList().size(); ++icoeff){
             RooAbsReal * coeff = dynamic_cast<RooAbsReal * >(fvih->coefList().at(icoeff));
+            requirePlainModifierParameter(*fvih->coefList().at(icoeff), fvih->GetName(), sampleName, "histosys");
             const std::string constraint = resolveConstraintPdfName(tool, ctx, *coeff);
             registerConstraint(ctx, coeff->GetName(), constraint);
             auto &m = mods.append_child().set_map();

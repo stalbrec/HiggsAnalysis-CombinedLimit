@@ -981,8 +981,23 @@ void exportOtherFactorModifiers(RooJSONFactoryWSTool* tool, JSONNode& mods, RooA
 // RooProduct factors instead of requiring the whole coefficient to match one known type: each
 // AsymPow is exactly the normsys it represents, so there is nothing to preserve by serializing
 // the AsymPow node itself.
+// DECISIONS.md 2026-11-11 item 4a: an HS3 histosys/normsys "parameter" is the name of a scalar free
+// parameter (/spec/docs/chapters/2.1.1_fundamental_distributions.md, histfactory_dist). A coefficient
+// that is not a plain RooRealVar (e.g. RooProduct(alpha, c)) has no exact representation there, so
+// the export stops instead of writing the compound node's name. Mirrored in VerticalInterpHistPdf.cc,
+// CMSHistSum.cc and JSONFactories_Combine.cxx.
+static void requirePlainModifierParameter(RooAbsArg const &par, std::string const &pdfName,
+                                          std::string const &sampleName, const char *modType)
+{
+   if (dynamic_cast<RooRealVar const *>(&par)) return;
+   RooJSONFactoryWSTool::error(std::string("HS3 export of pdf '") + pdfName + "', sample '" + sampleName + "': " +
+                               modType + " coefficient '" + par.GetName() + "' is a " + par.ClassName() +
+                               ", not a plain RooRealVar; an HS3 modifier \"parameter\" must be a scalar free "
+                               "parameter (see OPEN_ISSUES.md, scaled normsys/histosys coefficients).");
+}
+
 void exportCoeffModifier(RooJSONFactoryWSTool* tool, JSONNode& mods, RooAbsArg const* c,
-                          std::string const& sampleName) {
+                          std::string const& sampleName, std::string const& pdfName) {
   if (!c) {
     // do nothing
   } else if (auto* rcv = dynamic_cast<RooConstVar const*>(c)) {
@@ -999,6 +1014,8 @@ void exportCoeffModifier(RooJSONFactoryWSTool* tool, JSONNode& mods, RooAbsArg c
     nameConstraintOf(m, rrv->GetName());
     tool->queueExport(*rrv);
   } else if (auto* pn = dynamic_cast<const ProcessNormalization*>(c)) {
+    for (auto const* t : pn->thetaList()) requirePlainModifierParameter(*t, pdfName, sampleName, "normsys");
+    for (auto const* t : pn->asymmThetaList()) requirePlainModifierParameter(*t, pdfName, sampleName, "normsys");
     double nom = pn->nominalValue();
     auto variations = pn->sigmaVariationsAll();
     for (const auto& v : variations) {
@@ -1025,6 +1042,7 @@ void exportCoeffModifier(RooJSONFactoryWSTool* tool, JSONNode& mods, RooAbsArg c
       m["type"] << "normfactor";
     }
   } else if (auto* ap = dynamic_cast<const AsymPow*>(c)) {
+    requirePlainModifierParameter(ap->theta(), pdfName, sampleName, "normsys");
     auto& m = mods.append_child().set_map();
     m["name"] << ap->theta().GetName();
     m["parameter"] << ap->theta().GetName();
@@ -1036,7 +1054,7 @@ void exportCoeffModifier(RooJSONFactoryWSTool* tool, JSONNode& mods, RooAbsArg c
     tool->queueExport(ap->theta());
   } else if (auto* prod = dynamic_cast<RooProduct const*>(c)) {
     for (auto* comp : const_cast<RooProduct*>(prod)->components()) {
-      exportCoeffModifier(tool, mods, comp, sampleName);
+      exportCoeffModifier(tool, mods, comp, sampleName, pdfName);
     }
   } else {
     auto& m = mods.append_child().set_map();
@@ -1162,7 +1180,7 @@ static void exportPerProcessBinSamples(RooJSONFactoryWSTool *tool, const CMSHist
         contents[j] = errs[j];
         RooJSONFactoryWSTool::exportArray(nBins, contents.data(), s["data"].set_map()["contents"]);
         auto &mods = s["modifiers"].set_seq();
-        exportCoeffModifier(tool, mods, hs->coeffAt(ip), proc);
+        exportCoeffModifier(tool, mods, hs->coeffAt(ip), proc, hs->GetName());
         exportShapefactor(tool, mods, name, std::vector<RooAbsReal const *>(nBins, x), findConstraintPdf(ws, *x, obs));
       } else if (isPerProcessBin(hs, j, ip, 2)) {
         auto [v, c] = poissonBinPar(bp[j][ip]);
@@ -1173,11 +1191,12 @@ static void exportPerProcessBinSamples(RooJSONFactoryWSTool *tool, const CMSHist
         one[j] = nomT[j];
         RooJSONFactoryWSTool::exportArray(nBins, one.data(), s["data"].set_map()["contents"]);
         auto &mods = s["modifiers"].set_seq();
-        exportCoeffModifier(tool, mods, hs->coeffAt(ip), proc);
+        exportCoeffModifier(tool, mods, hs->coeffAt(ip), proc, hs->GetName());
         for (unsigned iv = 0; iv < hs->nMorphs(); ++iv) {
           if (!hs->isMorphUsed(ip, iv)) continue;
           RooAbsReal const *par = hs->morphPar(iv);
           if (!par) continue;
+          requirePlainModifierParameter(*par, hs->GetName(), proc, "histosys");
           std::vector<double> lo(nBins, 0.), hi(nBins, 0.);
           lo[j] = hs->downTemplate(ip, iv, false)[j];
           hi[j] = hs->upTemplate(ip, iv, false)[j];
@@ -1298,7 +1317,7 @@ bool tryExportHistFactory(RooJSONFactoryWSTool* tool, const CMSHistSum* hs, JSON
       auto &mods = s["modifiers"].set_seq();
 
     auto* coeff = hs->coeffAt(ip);
-    exportCoeffModifier(tool, mods, coeff, sampleName);
+    exportCoeffModifier(tool, mods, coeff, sampleName, hs->GetName());
 
       // Vertical morphs -> histosys modifiers
       for (unsigned iv = 0; iv < nMorphs; ++iv) {
@@ -1306,6 +1325,7 @@ bool tryExportHistFactory(RooJSONFactoryWSTool* tool, const CMSHistSum* hs, JSON
 
         RooAbsReal const *par = hs->morphPar(iv);
         if (!par) continue;
+        requirePlainModifierParameter(*par, hs->GetName(), sampleName, "histosys");
         const std::string sysName = par->GetName();
 
         auto const &upT = hs->upTemplate(ip, iv, false); 
@@ -1506,7 +1526,7 @@ bool tryExportHistFactoryFromPropagator(RooJSONFactoryWSTool* tool, const CMSHis
 
     // Rate part -- same coefficient dispatch CMSHistSum's own export uses.
     auto* coeff = (ip < static_cast<unsigned>(coeffs.getSize())) ? coeffs.at(ip) : nullptr;
-    exportCoeffModifier(tool, mods, coeff, sampleName);
+    exportCoeffModifier(tool, mods, coeff, sampleName, prop->GetName());
 
     // Vertical morphs -> histosys modifiers, probed numerically at theta = +-1. Written in
     // CMSHistSum's canonical order (its std::map of morph names, i.e. sorted by name), so the

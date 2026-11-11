@@ -207,10 +207,26 @@ std::string resolveConstraintPdfName(RooJSONFactoryWSTool *tool, RooAbsArg const
    return name;
 }
 
+// DECISIONS.md 2026-11-11 item 4a: an HS3 histosys/normsys "parameter" is the name of a scalar free
+// parameter (/spec/docs/chapters/2.1.1_fundamental_distributions.md, histfactory_dist). A coefficient
+// that is not a plain RooRealVar (e.g. RooProduct(alpha, c)) has no exact representation there, so
+// the export stops instead of writing the compound node's name. Mirrored in VerticalInterpHistPdf.cc,
+// CMSHistSum.cc and JSONFactories_Combine.cxx.
+static void requirePlainModifierParameter(RooAbsArg const &par, std::string const &pdfName,
+                                          std::string const &sampleName, const char *modType)
+{
+   if (dynamic_cast<RooRealVar const *>(&par)) return;
+   RooJSONFactoryWSTool::error(std::string("HS3 export of pdf '") + pdfName + "', sample '" + sampleName + "': " +
+                               modType + " coefficient '" + par.GetName() + "' is a " + par.ClassName() +
+                               ", not a plain RooRealVar; an HS3 modifier \"parameter\" must be a scalar free "
+                               "parameter (see OPEN_ISSUES.md, scaled normsys/histosys coefficients).");
+}
+
 void exportNormSys(RooJSONFactoryWSTool *tool, JSONNode &mods, RooAbsArg const &theta, double kappaLo, double kappaHi,
                    RooAbsCollection const &observables, RooAbsArg const &channel,
-                   std::map<std::string, std::string> &constraintCache)
+                   std::map<std::string, std::string> &constraintCache, std::string const &sampleName)
 {
+   requirePlainModifierParameter(theta, channel.GetName(), sampleName, "normsys");
    auto &m = mods.append_child().set_map();
    m["name"] << theta.GetName();
    m["parameter"] << theta.GetName();
@@ -285,13 +301,13 @@ bool tryExportCountingHistFactory(RooJSONFactoryWSTool *tool, const RooPoisson *
          auto const &logKappa = pn->logKappa();
          for (int i = 0; i < static_cast<int>(logKappa.size()); ++i) {
             exportNormSys(tool, mods, pn->thetaList()[i], std::exp(-logKappa[i]), std::exp(logKappa[i]), observables,
-                          *pois, constraintCache);
+                          *pois, constraintCache, sampleName);
          }
          // asymmetric log-normals
          auto const &logAsymmKappa = pn->logAsymmKappa();
          for (int i = 0; i < static_cast<int>(logAsymmKappa.size()); ++i) {
             exportNormSys(tool, mods, pn->asymmThetaList()[i], std::exp(logAsymmKappa[i].first),
-                          std::exp(logAsymmKappa[i].second), observables, *pois, constraintCache);
+                          std::exp(logAsymmKappa[i].second), observables, *pois, constraintCache, sampleName);
          }
          for (auto *of : pn->otherFactorList()) {
             exportOtherFactorModifiers(tool, mods, static_cast<RooAbsReal *>(of));
