@@ -204,19 +204,19 @@ public:
           return *this;
         }
         FastHisto_t(const std::vector<U>& binEdges,
-		    const std::vector<T>& contents,
-		    bool normX=false)
-	  : FastTemplate_t<T>()
-	  , axis_(binEdges)
-	  , normX_(normX)
+                    const std::vector<T>& contents,
+                    bool normX=false)
+          : FastTemplate_t<T>()
+          , axis_(binEdges)
+          , normX_(normX)
         {
-	  const unsigned nbins = axis_.GetNbins();
-	  if (contents.size() != nbins) {
-	    throw std::runtime_error("FastHisto_t: contents.size() != nbins");
-	  }
-	  this->size_ = nbins;
-	  this->values_.assign(contents.begin(), contents.end());
-	}
+          const unsigned nbins = axis_.GetNbins();
+          if (contents.size() != nbins) {
+            throw std::runtime_error("FastHisto_t: contents.size() != nbins");
+          }
+          this->size_ = nbins;
+          this->values_.assign(contents.begin(), contents.end());
+        }
 
         ~FastHisto_t() override {}
 };

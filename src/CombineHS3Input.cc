@@ -78,7 +78,8 @@ RooSimultaneousOpt *CombineHS3::makeSimultaneousOpt(RooWorkspace &w, RooStats::M
         for (RooAbsArg *c : cons) {
           const std::string cname = c->GetName();
           if (cname.rfind(bbPrefix, 0) == 0)
-            bbConstrs[cat->getCurrentIndex()].emplace_back(std::strtol(cname.c_str() + bbPrefix.size(), nullptr, 10), c);
+            bbConstrs[cat->getCurrentIndex()].emplace_back(
+                std::strtol(cname.c_str() + bbPrefix.size(), nullptr, 10), c);
           else extraConstrs.add(*c, /*silent=*/true);
         }
       }
@@ -148,7 +149,8 @@ RooSimultaneousOpt *CombineHS3::makeSimultaneousOpt(RooWorkspace &w, RooStats::M
     }
   }
   if (extraConstrs.getSize() > 0) {
-    if (verbose > 1) std::cout << "Attaching " << extraConstrs.getSize() << " constraint PDFs from JSON import." << std::endl;
+    if (verbose > 1)
+      std::cout << "Attaching " << extraConstrs.getSize() << " constraint PDFs from JSON import." << std::endl;
     optpdf->addExtraConstraints(extraConstrs);
   }
   if (!optpdf->importChannelMasksJSON(fileName.c_str(), w)) {

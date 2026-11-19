@@ -224,8 +224,9 @@ BBLiteExport::BBLiteExport(RooWorkspace &ws) : previous_(gActive)
                           [h](unsigned ip) -> RooAbsArg const * { return h->coeffAt(ip); },
                           [h](unsigned ip) {
                              RooAbsReal const *c = h->coeffAt(ip);
-                             return c->stringAttributes().count("combine.process") ? c->getStringAttribute("combine.process")
-                                                                                   : std::string(c->GetName());
+                             return c->stringAttributes().count("combine.process")
+                                        ? c->getStringAttribute("combine.process")
+                                        : std::string(c->GetName());
                           },
                           [h](unsigned j) { return h->binWidth(j); }});
       }
@@ -358,7 +359,8 @@ BBLiteExport::BBLiteExport(RooWorkspace &ws) : previous_(gActive)
                substitutes[pname][g->GetName()] = wsCopy;
                if (g == constraints.front()) cons[j] = wsCopy;
                if (!tagOf.emplace(pname, tag).second && tagOf[pname] != tag)
-                  throw std::runtime_error("HS3 autoMCStats export: " + pname + " shares bin parameters with two models");
+                  throw std::runtime_error("HS3 autoMCStats export: " + pname +
+                                           " shares bin parameters with two models");
             }
          }
          ys[j] = wsY;

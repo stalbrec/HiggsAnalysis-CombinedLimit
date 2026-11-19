@@ -436,8 +436,9 @@ void Combine::run(TString hlfFile, const std::string &dataset, double &limit, do
           mc->SetPdf(*pdf);
       }
       if (optSimPdf_) {
-          RooSimultaneousOpt *optpdf = isJSON ? CombineHS3::makeSimultaneousOpt(*w, *mc, *pdf, fileToLoad.Data(), verbose)
-                                              : new RooSimultaneousOpt(*pdf, TString(mc->GetPdf()->GetName())+"_opt");
+          RooSimultaneousOpt *optpdf =
+              isJSON ? CombineHS3::makeSimultaneousOpt(*w, *mc, *pdf, fileToLoad.Data(), verbose)
+                     : new RooSimultaneousOpt(*pdf, TString(mc->GetPdf()->GetName())+"_opt");
           w->import(*optpdf);
           mc->SetPdf(*optpdf);
       }

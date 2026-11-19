@@ -130,7 +130,7 @@ public:
     FastTemplate retval (storage_.at(processField(iproc)));
     if(!density){
       for(size_t i=0; i<nBins(); ++i){
-	retval[i] *= binWidth(i);
+        retval[i] *= binWidth(i);
       }
     }
     return retval;
@@ -158,7 +158,7 @@ public:
     }
     if(!density){
       for(size_t i=0; i<nBins(); ++i){
-	retval[i] *= binWidth(i);
+        retval[i] *= binWidth(i);
       }
     }
     return retval;
@@ -201,7 +201,7 @@ public:
     FastTemplate retval = binerrors_.at(iproc);
     if(!density){
       for(size_t i=0; i<nBins(); ++i){
-	retval[i] *= binWidth(i);
+        retval[i] *= binWidth(i);
       }
     }
     return retval;

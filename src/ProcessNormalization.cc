@@ -218,9 +218,9 @@ class ProcessNormalizationFactory : public RooFit::JSONIO::Importer {
 class ProcessNormalizationStreamer : public RooFit::JSONIO::Exporter {
     public:
         std::string const &key() const override {
-	  static std::string key_ = "CMS::ProcessNormalization";
-	  return key_;
-	}
+          static std::string key_ = "CMS::ProcessNormalization";
+          return key_;
+        }
     
         bool exportObject(RooJSONFactoryWSTool *, const RooAbsArg *func, JSONNode &elem) const override
         {

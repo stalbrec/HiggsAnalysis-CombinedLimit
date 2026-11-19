@@ -204,11 +204,8 @@ CMSHistSum::CMSHistSum(
       addsample_(other.addsample_),
       addmodifier_(other.addmodifier_)
 {
-  // removed the initialize call here
-  // calling initialize here can lead to stale pointers, as a call to RedirectServers such as during a RooWorkspace import
-  // can lead to the not-yet-redirected servers ending up in the in-workspace version of this object
-  // thus, it is safer to rely on the "lazy" call to initialize that happens in updateCache
-  // initialize();
+  // No initialize() here: during a RooWorkspace import, RedirectServers can leave the not-yet-redirected
+  // servers in the in-workspace copy (stale pointers). updateCache() initializes lazily instead.
 }
 
 void CMSHistSum::initialize() const {
@@ -780,7 +777,8 @@ void CMSHistSum::setData(RooAbsData const& data) const {
 void CMSHistSum::setAdditiveBinPars(std::vector<RooAbsReal *> const &pars, std::vector<double> const &scale,
                                     std::string const &sampleName, std::string const &modifierName) {
   if (addpars_.getSize())
-    throw std::runtime_error(std::string("CMSHistSum::setAdditiveBinPars: ") + GetName() + " already has additive bin parameters");
+    throw std::runtime_error(std::string("CMSHistSum::setAdditiveBinPars: ") + GetName() +
+                             " already has additive bin parameters");
   if (pars.size() != cache_.size() || scale.size() != cache_.size())
     throw std::runtime_error(std::string("CMSHistSum::setAdditiveBinPars: ") + GetName() + ": bin count differs");
   for (unsigned j = 0; j < pars.size(); ++j) {

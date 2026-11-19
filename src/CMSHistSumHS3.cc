@@ -40,12 +40,12 @@ using RooFit::Detail::JSONNode;
 using CombineHS3::approxSymmetricKappas;
 using CombineHS3::getOrMakeParameter;
 using CombineHS3::isSingleBinCountingDist;
-using CombineHS3::parse_double;
+using CombineHS3::parseDouble;
 using CombineHS3::readDoubleArray;
 using CombineHS3::requirePlainModifierParameter;
 
 // Helper: try to pick a reasonable process name.
-static std::string cms_hist_sum_process_name(const CMSHistSum &hs, unsigned ip)
+static std::string cmsHistSumProcessName(const CMSHistSum &hs, unsigned ip)
 {
   auto *coeff = hs.coeffAt(ip);   
   
@@ -73,7 +73,7 @@ static CMSHistSumConstraintCtx *g_hsCtx = nullptr;
 
 /// The constraint pdf of a parameter: "<par>_Pdf" (ShapeTools.py), if it depends on the parameter and
 /// on no observable; for the y_j of a type-1 bin (named <x>_y, CombineHS3BBLite.h) the one of x_j.
-/// By name only: a structural search (as in VerticalInterpHistPdf.cc) would also find, in an imported
+/// By name only: a structural search (as in VerticalInterpHistPdfHS3.cc) would also find, in an imported
 /// model, the type-1 constraints, whose mean y_j / E_j depends on every rate parameter.
 static RooAbsPdf *findConstraintPdf(RooWorkspace &ws, RooAbsArg const &par, RooArgSet const &observables)
 {
@@ -236,8 +236,8 @@ void exportAdditiveSample(RooJSONFactoryWSTool* tool, JSONNode& samples, std::st
   m["type"] << "shapefactor";
 }
 
-// CMSHistSum's per-process autoMCStats bin parameters (bin types 2, 3; DECISIONS.md 2026-11-04
-// hig20013), by bin and process (nullptr where there is none).
+// CMSHistSum's per-process autoMCStats bin parameters (bin types 2, 3), by bin and process
+// (nullptr where there is none).
 //   type 3: n_j += c_p * e_pj * x_jp, x_jp ~ Gauss(x_In | x_jp, 1)
 //   type 2: n_j += c_p * (g_jp - 1) * h_pj(theta), g_jp = v_jp * (1 / n_jp), v_jp ~ Poisson(n_jp | v_jp)
 // Written as additional samples, each with the process's rate modifiers (c_p) and a shapefactor:
@@ -313,7 +313,7 @@ static void exportPerProcessBinSamples(RooJSONFactoryWSTool *tool, const CMSHist
   RooWorkspace &ws = *tool->workspace();
   RooArgSet obs(hs->getXVar());
   for (unsigned ip = 0; ip < hs->nProcs(); ++ip) {
-    const std::string proc = cms_hist_sum_process_name(*hs, ip);
+    const std::string proc = cmsHistSumProcessName(*hs, ip);
     auto const errs = hs->binErrors(ip, false);
     auto const nomT = hs->nominalTemplate(ip, false);
     for (unsigned j = 0; j < nBins; ++j) {
@@ -443,7 +443,7 @@ bool tryExportHistFactory(RooJSONFactoryWSTool* tool, const CMSHistSum* hs, JSON
     for (auto const &t : hs->binTypes()) anyType1 |= t[0] == 1;
 
     for (unsigned ip = 0; ip < nProcs; ++ip) {
-      const std::string sampleName = cms_hist_sum_process_name(*hs, ip);
+      const std::string sampleName = cmsHistSumProcessName(*hs, ip);
 
       auto &s = samples.append_child().set_map();
       s["name"] << sampleName;
@@ -481,7 +481,7 @@ bool tryExportHistFactory(RooJSONFactoryWSTool* tool, const CMSHistSum* hs, JSON
 
         auto const &upT = hs->upTemplate(ip, iv, false); 
         auto const &dnT = hs->downTemplate(ip, iv, false);
-	  
+          
         auto &m = mods.append_child().set_map();
         m["name"] << sysName;
         m["parameter"] << sysName;
@@ -512,7 +512,8 @@ bool tryExportHistFactory(RooJSONFactoryWSTool* tool, const CMSHistSum* hs, JSON
 
     auto addPars = hs->additiveBinPars();
     if (bbYs && !addPars.empty())
-      RooJSONFactoryWSTool::error("CMSHistSum '" + std::string(hs->GetName()) + "': type-1 and additive bin parameters");
+      RooJSONFactoryWSTool::error("CMSHistSum '" + std::string(hs->GetName()) +
+                                  "': type-1 and additive bin parameters");
     if (bbYs) {
       exportType1BinSamples(tool, hs, samples, std::vector<RooAbsReal const *>(bbYs->begin(), bbYs->end()),
                             bb->binConstraints(*hs));
@@ -568,7 +569,7 @@ bool probeCMSHistFuncShape(CMSHistFunc const* func, std::vector<double> const& t
   // guards restore original parameter values here, on scope exit
 }
 
-std::string cms_hist_func_process_name(const CMSHistFunc &f)
+std::string cmsHistFuncProcessName(const CMSHistFunc &f)
 {
   if (f.stringAttributes().count("combine.process")) {
     return f.getStringAttribute("combine.process");
@@ -584,7 +585,8 @@ std::string cms_hist_func_process_name(const CMSHistFunc &f)
 // autoMCStats path (i.e. without --use-histsum). The per-process CMSHistFuncWrapper objects
 // ShapeTools.py optionally builds alongside it are auxiliary (plotting/shape-breakdown only, not
 // part of the likelihood -- see --no-wrappers) and are not needed for this export.
-bool tryExportHistFactoryFromPropagator(RooJSONFactoryWSTool* tool, const CMSHistErrorPropagator* prop, JSONNode& elem) {
+bool tryExportHistFactoryFromPropagator(RooJSONFactoryWSTool* tool, const CMSHistErrorPropagator* prop,
+                                        JSONNode& elem) {
   RooArgList const& funcs = prop->funcList();
   RooArgList const& coeffs = prop->coefList();
   const unsigned nProcs = funcs.getSize();
@@ -594,7 +596,7 @@ bool tryExportHistFactoryFromPropagator(RooJSONFactoryWSTool* tool, const CMSHis
   }
 
   // Decline pass: every process must be a plain vertical-only CMSHistFunc before a single byte is
-  // written into elem, mirroring the contract documented in VerticalInterpHistPdf.cc.
+  // written into elem, mirroring the contract documented in VerticalInterpHistPdfHS3.cc.
   std::vector<CMSHistFunc const*> hfuncs(nProcs);
   for (unsigned ip = 0; ip < nProcs; ++ip) {
     hfuncs[ip] = dynamic_cast<CMSHistFunc const*>(funcs.at(ip));
@@ -644,7 +646,7 @@ bool tryExportHistFactoryFromPropagator(RooJSONFactoryWSTool* tool, const CMSHis
 
   for (unsigned ip = 0; ip < nProcs; ++ip) {
     CMSHistFunc const *func = hfuncs[ip];
-    const std::string sampleName = cms_hist_func_process_name(*func);
+    const std::string sampleName = cmsHistFuncProcessName(*func);
     RooArgList const &vm = func->vmorphs();
     const unsigned nMorphs = vm.getSize();
 
@@ -753,14 +755,17 @@ bool tryExportHistFactoryFromPropagator(RooJSONFactoryWSTool* tool, const CMSHis
 
 const CMSHistSum* getCMSHistSum(const RooRealSumPdf* pdf){
   CMSHistSum* sum = 0;
-  if(pdf->funcList().size() == 1 && pdf->coefList().size() == 1 && pdf->coefList().at(0)->GetName() == std::string("ONE") && (sum = dynamic_cast<CMSHistSum*>(pdf->funcList().at(0))) && sum)
+  if(pdf->funcList().size() == 1 && pdf->coefList().size() == 1 &&
+     pdf->coefList().at(0)->GetName() == std::string("ONE") &&
+     (sum = dynamic_cast<CMSHistSum*>(pdf->funcList().at(0))) && sum)
     return sum;
   return nullptr;
 }
 
 const CMSHistSum* getCMSHistSum(const RooProdPdf* pdf){
   RooRealSumPdf* sum = 0;
-  if(pdf->getComponents()->getSize() == 1 && (sum = dynamic_cast<RooRealSumPdf*>(pdf->getComponents()->first())) && sum){
+  if(pdf->getComponents()->getSize() == 1 &&
+     (sum = dynamic_cast<RooRealSumPdf*>(pdf->getComponents()->first())) && sum){
     return getCMSHistSum(sum);
   }
   return nullptr;
@@ -771,14 +776,17 @@ const CMSHistSum* getCMSHistSum(const RooProdPdf* pdf){
 // CMSHistErrorPropagator instead of a CMSHistSum.
 const CMSHistErrorPropagator* getCMSHistErrorPropagator(const RooRealSumPdf* pdf){
   CMSHistErrorPropagator* prop = 0;
-  if(pdf->funcList().size() == 1 && pdf->coefList().size() == 1 && pdf->coefList().at(0)->GetName() == std::string("ONE") && (prop = dynamic_cast<CMSHistErrorPropagator*>(pdf->funcList().at(0))) && prop)
+  if(pdf->funcList().size() == 1 && pdf->coefList().size() == 1 &&
+     pdf->coefList().at(0)->GetName() == std::string("ONE") &&
+     (prop = dynamic_cast<CMSHistErrorPropagator*>(pdf->funcList().at(0))) && prop)
     return prop;
   return nullptr;
 }
 
 const CMSHistErrorPropagator* getCMSHistErrorPropagator(const RooProdPdf* pdf){
   RooRealSumPdf* sum = 0;
-  if(pdf->getComponents()->getSize() == 1 && (sum = dynamic_cast<RooRealSumPdf*>(pdf->getComponents()->first())) && sum){
+  if(pdf->getComponents()->getSize() == 1 &&
+     (sum = dynamic_cast<RooRealSumPdf*>(pdf->getComponents()->first())) && sum){
     return getCMSHistErrorPropagator(sum);
   }
   return nullptr;
@@ -799,7 +807,6 @@ public:
        auto retval = tryExportHistFactory(tool,sum,elem,p);
        if(!retval) return false;
        elem["type"] << key();
-        std::cout << "exporting CMSHistSum to histfactory" << std::endl;
        return true;
      }
      return false;
@@ -821,22 +828,17 @@ public:
      if(auto sum = getCMSHistSum(rsp)){
        auto retval = tryExportHistFactory(tool,sum,elem,p);
        if(retval){
-	 elem["type"] << key();
-  std::cout << "exporting RooRealSumPdf to histfactory" << std::endl;
-
-	 return true;
+         elem["type"] << key();
+         return true;
        }
-       std::cout << "failure" << std::endl;
        return false;
      }
      if(auto prop = getCMSHistErrorPropagator(rsp)){
        auto retval = tryExportHistFactoryFromPropagator(tool,prop,elem);
        if(retval){
          elem["type"] << key();
-         std::cout << "exporting RooRealSumPdf (CMSHistErrorPropagator) to histfactory" << std::endl;
          return true;
        }
-       std::cout << "failure" << std::endl;
      }
      return false;
    }
@@ -858,14 +860,12 @@ public:
        auto retval = tryExportHistFactory(tool,sum,elem,p);
        if(!retval) return false;
        elem["type"] << key();
-      std::cout << "exporting RooProdPdf to histfactory" << std::endl;
        return true;
      }
      if(auto prop = getCMSHistErrorPropagator(pp)){
        auto retval = tryExportHistFactoryFromPropagator(tool,prop,elem);
        if(!retval) return false;
        elem["type"] << key();
-       std::cout << "exporting RooProdPdf (CMSHistErrorPropagator) to histfactory" << std::endl;
        return true;
      }
      return false;
@@ -993,8 +993,8 @@ namespace {
 
 
 FastHisto readFastHisto(const JSONNode &n,
-					 const std::string &name,
-					 RooArgSet const &vars)
+                                         const std::string &name,
+                                         RooArgSet const &vars)
 {
   if (!n.has_child("contents"))
     RooJSONFactoryWSTool::error("no contents given");
@@ -1060,7 +1060,8 @@ static RooRealVar &getObservable(RooJSONFactoryWSTool *tool, std::string const &
    if (auto *arg = tool->workspace()->arg(obsName.c_str())) {
       auto *rrv = dynamic_cast<RooRealVar *>(arg);
       if (!rrv)
-         throw std::runtime_error("histfactory_dist importer: observable '" + obsName + "' exists but is not RooRealVar");
+         throw std::runtime_error("histfactory_dist importer: observable '" + obsName +
+                                  "' exists but is not RooRealVar");
       return *rrv;
    }
 
@@ -1187,7 +1188,8 @@ public:
                                      "' together with other modifiers is not supported");
           std::string const gaus = "_gaus";
           bool const t2 = procs.count(stem) > 0;
-          bool const t3 = stem.size() > gaus.size() && stem.compare(stem.size() - gaus.size(), gaus.size(), gaus) == 0 &&
+          bool const t3 = stem.size() > gaus.size() &&
+                          stem.compare(stem.size() - gaus.size(), gaus.size(), gaus) == 0 &&
                           procs.count(stem.substr(0, stem.size() - gaus.size())) > 0;
           if (t3 == t2)
             throw std::runtime_error("CMSHistSum importer: cannot tell which process autoMCStats sample '" + name +
@@ -1199,7 +1201,7 @@ public:
       std::map<std::string, unsigned> procIndex;
 
       for(const auto&s:elem["samples"].children()){
-	const std::string sampleName = s["name"].val();
+        const std::string sampleName = s["name"].val();
 
          if (s.has_child("modifiers")) {
             bool hasShapefactor = false;
@@ -1214,13 +1216,15 @@ public:
                unsigned jb = 0;
                if (splitBinSuffix(sampleName, stem, jb) && stem == "mcstat") {
                   if (m["name"].val() != sampleName)
-                     throw std::runtime_error("CMSHistSum importer: shapefactor of '" + sampleName + "' has another name");
+                     throw std::runtime_error("CMSHistSum importer: shapefactor of '" + sampleName +
+                                              "' has another name");
                   std::set<std::string> pn;
                   for (auto const &par : m["parameters"].children()) pn.insert(par.val());
                   auto const vals = readDoubleArray(s["data"]["contents"]);
                   if (pn.size() != 1 || static_cast<int>(m["parameters"].num_children()) != x->numBins() ||
                       static_cast<int>(vals.size()) != x->numBins() || static_cast<int>(jb) >= x->numBins())
-                     throw std::runtime_error("CMSHistSum importer: '" + sampleName + "' is not one parameter in every bin");
+                     throw std::runtime_error("CMSHistSum importer: '" + sampleName +
+                                              "' is not one parameter in every bin");
                   for (unsigned k = 0; k < vals.size(); ++k)
                      if (k != jb && vals[k] != 0.)
                         throw std::runtime_error("CMSHistSum importer: '" + sampleName + "' is not 0 outside its bin");
@@ -1238,14 +1242,16 @@ public:
                   throw std::runtime_error("CMSHistSum importer: constrained shapefactor on sample '" + sampleName +
                                            "' is not supported");
                if (additive)
-                  throw std::runtime_error("CMSHistSum importer: more than one shapefactor sample in '" + distName + "'");
+                  throw std::runtime_error("CMSHistSum importer: more than one shapefactor sample in '" +
+                                           distName + "'");
                additive = std::make_unique<Additive>();
                additive->sample = sampleName;
                additive->modifier = m["name"].val();
                additive->scale = readDoubleArray(s["data"]["contents"]);
                if (static_cast<int>(additive->scale.size()) != x->numBins() ||
                    static_cast<int>(m["parameters"].num_children()) != x->numBins())
-                  throw std::runtime_error("CMSHistSum importer: shapefactor sample '" + sampleName + "' size != nbins");
+                  throw std::runtime_error("CMSHistSum importer: shapefactor sample '" + sampleName +
+                                           "' size != nbins");
                for (auto const &par : m["parameters"].children()) {
                   additive->pars.push_back(&getOrMakeParameter(tool, par.val(), 0.0, -7.0, 7.0));
                }
@@ -1287,7 +1293,7 @@ public:
             if (static_cast<int>(errors.size()) != x->numBins())
                throw std::runtime_error("CMSHistSum importer: sample '" + sampleName + "' errors size != nbins");
          } else {
-	   errors.assign(x->numBins(), 0.0);
+           errors.assign(x->numBins(), 0.0);
          }
 
          // Build a TH1D with that binning (uniform, defined by axis min/max/nbins)
@@ -1298,139 +1304,139 @@ public:
             h->SetBinError(ib, errors[ib - 1]);
          }
 
-	 const std::string funcName = distName + "_histosys_" + sampleName;
+         const std::string funcName = distName + "_histosys_" + sampleName;
          auto *func = new CMSHistFunc(funcName.c_str(), funcName.c_str(), *x, *h);
 
-	 struct VMorph {
-	   FastHisto low;
-	   FastHisto high;
-	   VMorph(const FastHisto& low_, const FastHisto& high_):low(std::move(low_)),high(std::move(high_)){}
-	 };
-	 RooArgList vmorph_pars;
-	 std::vector<VMorph> vmorphs;
+         struct VMorph {
+           FastHisto low;
+           FastHisto high;
+           VMorph(const FastHisto& low_, const FastHisto& high_):low(std::move(low_)),high(std::move(high_)){}
+         };
+         RooArgList vmorph_pars;
+         std::vector<VMorph> vmorphs;
 
-	 // Rate modifiers, in order, become a product of ProcessNormalizations. exportCoeffModifier
-	 // writes one as [symmetric normsys][asymmetric normsys][other factors][<sample>_norm_nominal],
-	 // so a new segment starts whenever the next modifier cannot follow in that order; the
-	 // re-export then has the same modifiers in the same order.
-	 struct RateSegment {
-	   enum Phase { Sym, Asym, Other, Nominal } phase = Sym;
-	   std::vector<std::pair<RooAbsReal*, std::pair<double,double>>> normsys;
-	   RooArgList others;
-	   double nominal = 1.;
-	 };
-	 std::vector<RateSegment> segments;
-	 auto segmentFor = [&segments](RateSegment::Phase phase) -> RateSegment& {
-	   if (segments.empty() || segments.back().phase > phase) segments.emplace_back();
-	   segments.back().phase = phase;
-	   return segments.back();
-	 };
-	 const std::string normNominalName = sampleName + "_norm_nominal";
+         // Rate modifiers, in order, become a product of ProcessNormalizations. exportCoeffModifier
+         // writes one as [symmetric normsys][asymmetric normsys][other factors][<sample>_norm_nominal],
+         // so a new segment starts whenever the next modifier cannot follow in that order; the
+         // re-export then has the same modifiers in the same order.
+         struct RateSegment {
+           enum Phase { Sym, Asym, Other, Nominal } phase = Sym;
+           std::vector<std::pair<RooAbsReal*, std::pair<double,double>>> normsys;
+           RooArgList others;
+           double nominal = 1.;
+         };
+         std::vector<RateSegment> segments;
+         auto segmentFor = [&segments](RateSegment::Phase phase) -> RateSegment& {
+           if (segments.empty() || segments.back().phase > phase) segments.emplace_back();
+           segments.back().phase = phase;
+           return segments.back();
+         };
+         const std::string normNominalName = sampleName + "_norm_nominal";
 
          if (s.has_child("modifiers")) {
-	   for(const auto& m:s["modifiers"].children()){
-	     const std::string mtype = m["type"].val();
-	     const std::string mname = m["name"].val();
-	     if (isRateModifier(m)) rateMods.push_back(jsonDump(m));
+           for(const auto& m:s["modifiers"].children()){
+             const std::string mtype = m["type"].val();
+             const std::string mname = m["name"].val();
+             if (isRateModifier(m)) rateMods.push_back(jsonDump(m));
 
                if (mtype == "normfactor") {
                   // Typical: a floating POI or nuisance scaling a process yield
-		  double value;
-		  if(parse_double(m["parameter"].val(),value)){
-		    // numeric: val() keeps only 6 significant digits, so read it with val_double()
-		    value = m["parameter"].val_double();
-		    if (mname == normNominalName) {
-		      segmentFor(RateSegment::Nominal).nominal = value;
-		    } else {
-		      auto *c = new RooConstVar(mname.c_str(), mname.c_str(), value);
-		      tool->workspace()->import(*c, RooFit::RecycleConflictNodes());
-		      segmentFor(RateSegment::Other).others.add(*tool->workspace()->arg(mname.c_str()));
-		    }
-		  } else {
-		    RooRealVar &p = getOrMakeParameter(tool, m["parameter"].val(), 1.0, 0.0, 10.0);
-		    segmentFor(RateSegment::Other).others.add(p);
-		  }
-	       } else if (mtype == "custom"){
+                  double value;
+                  if(parseDouble(m["parameter"].val(),value)){
+                    // numeric: val() keeps only 6 significant digits, so read it with val_double()
+                    value = m["parameter"].val_double();
+                    if (mname == normNominalName) {
+                      segmentFor(RateSegment::Nominal).nominal = value;
+                    } else {
+                      auto *c = new RooConstVar(mname.c_str(), mname.c_str(), value);
+                      tool->workspace()->import(*c, RooFit::RecycleConflictNodes());
+                      segmentFor(RateSegment::Other).others.add(*tool->workspace()->arg(mname.c_str()));
+                    }
+                  } else {
+                    RooRealVar &p = getOrMakeParameter(tool, m["parameter"].val(), 1.0, 0.0, 10.0);
+                    segmentFor(RateSegment::Other).others.add(p);
+                  }
+               } else if (mtype == "custom"){
                   // This might be normalization factor that is given by a ProcessNormalization or RooFormulaVar
                   RooAbsReal *obj = tool->workspace()->function(mname);
-		  if(!obj){
-		    throw std::runtime_error(
-					     "CMSHistSum importer: custom modifier '" + mname + "' on sample '" + sampleName +
-					     "' not yet imported, there seems to be a priority/ordering issue");
-		  }
-		  segmentFor(RateSegment::Other).others.add(*obj);
+                  if(!obj){
+                    throw std::runtime_error("CMSHistSum importer: custom modifier '" + mname + "' on sample '" +
+                                             sampleName +
+                                             "' not yet imported, there seems to be a priority/ordering issue");
+                  }
+                  segmentFor(RateSegment::Other).others.add(*obj);
                } else if (mtype == "staterror") {
                   // Already encoded via per-bin errors; CMSHistSum will handle BBB if configured.
                   continue;
-	       } else if (mtype == "normsys"){
-		 auto *parameter = m.find("parameter");
-		 std::string parname(parameter ? parameter->val() : "alpha_" + mname);
-		 RooRealVar &p = getOrMakeParameter(tool, parname, 0.0, -10., 10.0);
-		 auto& data = m["data"];
-		 double lo = data["lo"].val_double();
-		 double hi = data["hi"].val_double();
-		 const bool sym = approxSymmetricKappas(lo, hi);
-		 segmentFor(sym ? RateSegment::Sym : RateSegment::Asym).normsys.push_back({&p, {lo, hi}});
-	       } else if (mtype == "histosys"){
-		 // collect all the histosys first, will assign them later when we know how many there are
-		 auto *parameter = m.find("parameter");
-		 std::string parname(parameter ? parameter->val() : "alpha_" + mname);
-		 RooRealVar &p = getOrMakeParameter(tool, parname, 0.0, -10., 10.0);		 
-		 vmorph_pars.add(p);
-		 auto &data = m["data"];
-		 auto lo = readDoubleArray(data["lo"]["contents"]);
-		 auto hi = readDoubleArray(data["hi"]["contents"]);
-		 for (auto const &[j, bb] : type2) {
-		   RooFit::Detail::JSONNode const *bbm = nullptr;
-		   for (auto const &mm : (*bb)["modifiers"].children())
-		     if (mm["type"].val() == "histosys" && mm["name"].val() == mname) bbm = &mm;
-		   std::string const what = std::string((*bb)["name"].val()) + " histosys " + mname;
-		   if (!bbm) throw std::runtime_error("CMSHistSum importer: no " + what);
-		   restoreBin(lo, readDoubleArray((*bbm)["data"]["lo"]["contents"]), j, what + " lo");
-		   restoreBin(hi, readDoubleArray((*bbm)["data"]["hi"]["contents"]), j, what + " hi");
-		 }
-		 histosysNames.push_back(jsonDump(m["name"]) + jsonDump(m["parameter"]));
-		 vmorphs.emplace_back(fastHistoFrom(lo, *x, mname + "Low_" + sampleName),
-		                      fastHistoFrom(hi, *x, mname + "High_" + sampleName));
+               } else if (mtype == "normsys"){
+                 auto *parameter = m.find("parameter");
+                 std::string parname(parameter ? parameter->val() : "alpha_" + mname);
+                 RooRealVar &p = getOrMakeParameter(tool, parname, 0.0, -10., 10.0);
+                 auto& data = m["data"];
+                 double lo = data["lo"].val_double();
+                 double hi = data["hi"].val_double();
+                 const bool sym = approxSymmetricKappas(lo, hi);
+                 segmentFor(sym ? RateSegment::Sym : RateSegment::Asym).normsys.push_back({&p, {lo, hi}});
+               } else if (mtype == "histosys"){
+                 // collect all the histosys first, will assign them later when we know how many there are
+                 auto *parameter = m.find("parameter");
+                 std::string parname(parameter ? parameter->val() : "alpha_" + mname);
+                 RooRealVar &p = getOrMakeParameter(tool, parname, 0.0, -10., 10.0);             
+                 vmorph_pars.add(p);
+                 auto &data = m["data"];
+                 auto lo = readDoubleArray(data["lo"]["contents"]);
+                 auto hi = readDoubleArray(data["hi"]["contents"]);
+                 for (auto const &[j, bb] : type2) {
+                   RooFit::Detail::JSONNode const *bbm = nullptr;
+                   for (auto const &mm : (*bb)["modifiers"].children())
+                     if (mm["type"].val() == "histosys" && mm["name"].val() == mname) bbm = &mm;
+                   std::string const what = std::string((*bb)["name"].val()) + " histosys " + mname;
+                   if (!bbm) throw std::runtime_error("CMSHistSum importer: no " + what);
+                   restoreBin(lo, readDoubleArray((*bbm)["data"]["lo"]["contents"]), j, what + " lo");
+                   restoreBin(hi, readDoubleArray((*bbm)["data"]["hi"]["contents"]), j, what + " hi");
+                 }
+                 histosysNames.push_back(jsonDump(m["name"]) + jsonDump(m["parameter"]));
+                 vmorphs.emplace_back(fastHistoFrom(lo, *x, mname + "Low_" + sampleName),
+                                      fastHistoFrom(hi, *x, mname + "High_" + sampleName));
                } else {
                   // Shape and other modifiers: not safely mappable without CMSHistFunc’s public morphing API.
                   throw std::runtime_error(
                       "CMSHistSum importer: modifier type '" + mtype + "' on sample '" + sampleName +
                       "' is not supported by this CMSHistSum importer yet");
                }
-	   }
+           }
          }
 
-	 assert(vmorphs.size() == vmorph_pars.size());
+         assert(vmorphs.size() == vmorph_pars.size());
 
-	 // actually assign the morphs
-	 func->setVerticalMorphs(vmorph_pars);
-	 func->prepareStorage();
-	 for(size_t i=0; i<vmorphs.size(); ++i){
-	   func->setShape(0, 0, i+1, 0, vmorphs[i].low);
-	   func->setShape(0, 0, i+1, 1, vmorphs[i].high);
-	 }
+         // actually assign the morphs
+         func->setVerticalMorphs(vmorph_pars);
+         func->prepareStorage();
+         for(size_t i=0; i<vmorphs.size(); ++i){
+           func->setShape(0, 0, i+1, 0, vmorphs[i].low);
+           func->setShape(0, 0, i+1, 1, vmorphs[i].high);
+         }
          funcs.add(*func);
 
-	 RooArgList coeffFactors;
-	 for (std::size_t iseg = 0; iseg < segments.size(); ++iseg) {
-	   RateSegment const &seg = segments[iseg];
-	   const std::string pnName = distName + "_overallsys_" + sampleName + (iseg ? "_" + std::to_string(iseg) : "");
-	   auto* pn = new ProcessNormalization(pnName.c_str(), pnName.c_str(), seg.nominal);
-	   for (auto const &[par, kappas] : seg.normsys) {
-	     // lo/hi are the relative factors at theta = -1/+1: symmetric kappa = hi (kappa^theta)
-	     if (approxSymmetricKappas(kappas.first, kappas.second)) {
-	       pn->addLogNormal(kappas.second, *par);
-	     } else {
-	       pn->addAsymmLogNormal(kappas.first, kappas.second, *par);
-	     }
-	   }
-	   for (auto *other : seg.others) pn->addOtherFactor(static_cast<RooAbsReal &>(*other));
-	   coeffFactors.add(*pn);
-	 }
+         RooArgList coeffFactors;
+         for (std::size_t iseg = 0; iseg < segments.size(); ++iseg) {
+           RateSegment const &seg = segments[iseg];
+           const std::string pnName = distName + "_overallsys_" + sampleName + (iseg ? "_" + std::to_string(iseg) : "");
+           auto* pn = new ProcessNormalization(pnName.c_str(), pnName.c_str(), seg.nominal);
+           for (auto const &[par, kappas] : seg.normsys) {
+             // lo/hi are the relative factors at theta = -1/+1: symmetric kappa = hi (kappa^theta)
+             if (approxSymmetricKappas(kappas.first, kappas.second)) {
+               pn->addLogNormal(kappas.second, *par);
+             } else {
+               pn->addAsymmLogNormal(kappas.first, kappas.second, *par);
+             }
+           }
+           for (auto *other : seg.others) pn->addOtherFactor(static_cast<RooAbsReal &>(*other));
+           coeffFactors.add(*pn);
+         }
 
          // One coefficient object per sample, even for a single (possibly shared) factor: it
-         // carries the sample name for the exporter (cms_hist_sum_process_name).
+         // carries the sample name for the exporter (cmsHistSumProcessName).
          const std::string coeffName = distName + "_" + sampleName + "_rate";
          auto *prod = new RooProduct(coeffName.c_str(), coeffName.c_str(), coeffFactors);
          prod->setStringAttribute("combine.process", sampleName.c_str());
@@ -1454,14 +1460,17 @@ public:
              for (std::size_t k = 0; ok && k < rateMods.size(); ++k) ok = jsonDump(*mods[k]) == rateMods[k];
              for (std::size_t k = 0; ok && k < nh; ++k) {
                auto const &mm = *mods[rateMods.size() + k];
-               ok = mm["type"].val() == "histosys" && jsonDump(mm["name"]) + jsonDump(mm["parameter"]) == histosysNames[k];
+               ok = mm["type"].val() == "histosys" &&
+                    jsonDump(mm["name"]) + jsonDump(mm["parameter"]) == histosysNames[k];
              }
              if (ok && withHistosys) {
                auto const &nf = *mods[mods.size() - 2];
                double v;
-               ok = nf["type"].val() == "normfactor" && parse_double(nf["parameter"].val(), v);
+               ok = nf["type"].val() == "normfactor" && parseDouble(nf["parameter"].val(), v);
              }
-             if (ok) ok = mods.back()->operator[]("type").val() == "shapefactor" && mods.back()->operator[]("name").val() == bbName;
+             if (ok)
+               ok = mods.back()->operator[]("type").val() == "shapefactor" &&
+                    mods.back()->operator[]("name").val() == bbName;
              if (!ok)
                throw std::runtime_error("CMSHistSum importer: autoMCStats sample '" + bbName +
                                         "' does not carry the modifiers of process '" + sampleName + "'");
@@ -1483,7 +1492,8 @@ public:
       auto mark = [&](unsigned j, unsigned ip, unsigned type, RooAbsReal *par, std::string const &what) {
         if (j >= nb) throw std::runtime_error("CMSHistSum importer: " + what + ": bin out of range");
         if (binTypes[j].size() == 1) binTypes[j].assign(np, 4);
-        if (binTypes[j][ip] != 4) throw std::runtime_error("CMSHistSum importer: " + what + ": bin " + std::to_string(j) + " twice");
+        if (binTypes[j][ip] != 4) throw std::runtime_error("CMSHistSum importer: " + what + ": bin " +
+                                                           std::to_string(j) + " twice");
         binTypes[j][ip] = type;
         binPars[j][ip] = par;
       };
@@ -1512,7 +1522,8 @@ public:
           std::set<std::string> names;
           for (auto const &pn : sf["parameters"].children()) names.insert(pn.val());
           if (names.size() != 1 || sf["parameters"].num_children() != nb)
-            throw std::runtime_error("CMSHistSum importer: " + bbName + ": shapefactor must name one parameter in every bin");
+            throw std::runtime_error("CMSHistSum importer: " + bbName +
+                                     ": shapefactor must name one parameter in every bin");
           RooRealVar &v = getOrMakeParameter(tool, *names.begin(), 1.0, 0.0, 10.0);
           std::vector<RooFit::Detail::JSONNode const *> mods;
           for (auto const &mm : (*node)["modifiers"].children()) mods.push_back(&mm);
@@ -1525,7 +1536,8 @@ public:
           }
           auto *c = dynamic_cast<RooConstVar *>(tool->workspace()->arg(cname.c_str()));
           if (!c || c->getVal() != cval)
-            throw std::runtime_error("CMSHistSum importer: " + bbName + ": constant '" + cname + "' exists with another value");
+            throw std::runtime_error("CMSHistSum importer: " + bbName + ": constant '" + cname +
+                                     "' exists with another value");
           const std::string gname = std::string(v.GetName()) + "_prod";
           if (!tool->workspace()->function(gname.c_str())) {
             RooProduct g(gname.c_str(), "", RooArgList(v, *c));
@@ -1545,7 +1557,8 @@ public:
       auto *sum = new CMSHistSum(sumName.c_str(), sumName.c_str(), *x, funcs, coeffs);
       if (importedBinPars.getSize()) sum->setImportedBinPars(binTypes, importedBinPars);
       if (additive && type1)
-         throw std::runtime_error("CMSHistSum importer: '" + distName + "' has both an mcstat sample and mcstat_bin<j> samples");
+         throw std::runtime_error("CMSHistSum importer: '" + distName +
+                                  "' has both an mcstat sample and mcstat_bin<j> samples");
       if (additive) sum->setAdditiveBinPars(additive->pars, additive->scale, additive->sample, additive->modifier);
       if (type1) sum->setAdditiveBinPars(type1->pars, type1->scale, "", "");
       tool->workspace()->import(*sum, RooFit::RecycleConflictNodes());

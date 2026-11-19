@@ -170,7 +170,8 @@ RooSimultaneousOpt::importChannelMasksJSON(const std::string &fileName, RooWorks
         masks.erase(it);
     }
     if (!masks.empty()) {
-        std::cerr << "RooSimultaneousOpt::importChannelMasksJSON: mask for unknown channel " << masks.begin()->first << "\n";
+        std::cerr << "RooSimultaneousOpt::importChannelMasksJSON: mask for unknown channel "
+                  << masks.begin()->first << "\n";
         return false;
     }
     addChannelMasks(list);

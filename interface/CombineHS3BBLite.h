@@ -2,10 +2,9 @@
 #define HiggsAnalysis_CombinedLimit_CombineHS3BBLite_h
 
 // HS3 export of autoMCStats (Barlow-Beeston-lite) bin parameters of CMSHistErrorPropagator and
-// CMSHistSum (Decision 1 with point 6 (y_j) and point 7 option (a), DECISIONS.md 2026-11-03).
-// This covers the bins with one parameter for the total (type 1). CMSHistSum's per-process bins
-// (types 2, 3; DECISIONS.md 2026-11-04 hig20013) keep their parameters and are written by its
-// histfactory exporter (CMSHistSum.cc, exportPerProcessBinSamples).
+// CMSHistSum. This covers the bins with one parameter for the total (type 1). CMSHistSum's
+// per-process bins (types 2, 3) keep their parameters and are written by its histfactory exporter
+// (CMSHistSumHS3.cc, exportPerProcessBinSamples).
 //
 // Combine, bin type 1:  n_j = S_j(theta) + x_j * E_j(theta),  x_j ~ Gauss(x_j_In | x_j, 1),
 //                       E_j(theta) = sqrt(sum_p c_p(theta)^2 e_pj^2).
@@ -15,7 +14,8 @@
 // Bins without a term (type 0, or beyond the propagator's active bins) have contents 0 in `mcstat`
 // and borrow a neighbouring y_j (shapefactor needs a parameter per bin).
 // With y_j = x_j * E_j(theta) both are the same likelihood. The 1e-9 floor Combine applies to the
-// bin totals is not written (point 7 option (a)).
+// bin totals is not written (histfactory_dist has none), so the two differ only where a bin total
+// falls below it.
 //
 // Objects written for bin parameter <x> (e.g. prop_binch1_bin3): the unbounded parameter <x>_y, the
 // functions <x>_E (E_j) and <x>_mean (y_j / E_j), and per process p of the channel
@@ -57,7 +57,8 @@ public:
    /// The instance of the export in progress, or nullptr.
    static BBLiteExport const *active();
 
-   /// y_j per bin (nullptr for bins without a type-1 term) of this CMSHistErrorPropagator / CMSHistSum, or nullptr if it has no reparameterized bins.
+   /// y_j per bin (nullptr for bins without a type-1 term) of this CMSHistErrorPropagator / CMSHistSum, or nullptr if
+   /// it has no reparameterized bins.
    std::vector<RooRealVar *> const *binParameters(RooAbsArg const &prop) const;
    /// The constraint of x_j per bin (as binParameters(); for a model with its own copies, the copy), or nullptr.
    std::vector<RooAbsPdf *> const *binConstraints(RooAbsArg const &prop) const;

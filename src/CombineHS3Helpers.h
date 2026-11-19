@@ -29,7 +29,7 @@
 namespace CombineHS3 {
 
 /// Parse a whole string as a double; false (and `out` untouched) unless every character is consumed.
-inline bool parse_double(const std::string &input, double &out)
+inline bool parseDouble(const std::string &input, double &out)
 {
    const char *begin = input.data();
    const char *end = input.data() + input.size();
@@ -69,7 +69,8 @@ inline RooRealVar &getOrMakeParameter(RooJSONFactoryWSTool *tool, std::string co
    if (auto *arg = tool->workspace()->arg(parName.c_str())) {
       auto *rrv = dynamic_cast<RooRealVar *>(arg);
       if (!rrv)
-         throw std::runtime_error("histfactory_dist importer: parameter '" + parName + "' exists but is not RooRealVar");
+         throw std::runtime_error("histfactory_dist importer: parameter '" + parName +
+                                  "' exists but is not RooRealVar");
       return *rrv;
    }
    auto *rrv = new RooRealVar(parName.c_str(), parName.c_str(), init, lo, hi);
@@ -89,7 +90,7 @@ inline void requirePlainModifierParameter(RooAbsArg const &par, std::string cons
    RooJSONFactoryWSTool::error(std::string("HS3 export of pdf '") + pdfName + "', sample '" + sampleName + "': " +
                                modType + " coefficient '" + par.GetName() + "' is a " + par.ClassName() +
                                ", not a plain RooRealVar; an HS3 modifier \"parameter\" must be a scalar free "
-                               "parameter (see OPEN_ISSUES.md, scaled normsys/histosys coefficients).");
+                               "parameter.");
 }
 
 /// Name of the constraint pdf of `theta` to write as a modifier's "constraint" ("" = none), cached per theta.

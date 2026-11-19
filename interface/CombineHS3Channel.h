@@ -1,10 +1,10 @@
 #ifndef HiggsAnalysis_CombinedLimit_CombineHS3Channel_h
 #define HiggsAnalysis_CombinedLimit_CombineHS3Channel_h
 
-// HS3: where a channel's constraint terms live (hig20013_nobb, "RooSimultaneousOpt items", option A).
+// HS3: where a channel's constraint terms live.
 //
 // A histfactory_dist modifier that names a `constraint` brings that constraint term into the
-// distribution (/spec docs/parts/histfactory.md). So Combine's histfactory_dist importers build
+// distribution (HS3 standard, histfactory_dist). So Combine's histfactory_dist importers build
 // such a channel as RooProdPdf(<name>, [<name>_model, constraints in order of first reference]),
 // with the channel itself under <name>_model, as ROOT's own HistFactory importer does.
 // exportConstrainedChannel() writes that product back as the same histfactory_dist.

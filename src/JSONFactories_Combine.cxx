@@ -34,7 +34,7 @@ namespace {
 using CombineHS3::approxSymmetricKappas;
 using CombineHS3::getOrMakeParameter;
 using CombineHS3::isSingleBinCountingDist;
-using CombineHS3::parse_double;
+using CombineHS3::parseDouble;
 using CombineHS3::requirePlainModifierParameter;
 using CombineHS3::resolveConstraintPdfName;
 using CombineHS3::writeNormSys;
@@ -203,7 +203,6 @@ public:
       if (!tryExportCountingHistFactory(tool, pois, elem))
          return false;
       elem["type"] << key();
-           std::cout << "exporting RooPoisson of RooAddition to histfactory" << std::endl;
 
       return true;
    }
@@ -286,7 +285,7 @@ public:
                   auto const *par = m.find("parameter");
                   const std::string parval(par ? par->val() : mname);
                   double literal = 0.;
-                  if (parse_double(parval, literal)) {
+                  if (parseDouble(parval, literal)) {
                      // Written by the exporter for a RooConstVar other-factor: recreate it under
                      // its original name so the round trip is name-stable.
                      if (auto *existingCv = tool->workspace()->function(mname)) {

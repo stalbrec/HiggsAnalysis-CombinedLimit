@@ -121,19 +121,18 @@ using RooFit::Detail::JSONNode;
 // existence), so ROOT's own top-level export walks and tries to export every one of them whether
 // or not the actual likelihood references it.
 //
-// A *declining* exporter does not help here (confirmed by reading RooJSONFactoryWSTool::
-// exportObject, ~L1010-1024 of root@fbad13f: the {"name": ...} stub is created before the
-// exporter is even looked up, and a `false` return explicitly clears any partial content but
-// leaves that stub in place) -- so this must actually succeed. There is no way to represent "this
-// process's shape with the propagator's live per-bin correction applied" as a reusable HS3 node
-// without re-deriving the parent histfactory_dist's own staterror gammas per-bin, which is exactly
-// the information histfactory_dist already carries once reimported. Instead, export a plain static
-// histogram snapshot at the current (export-time) parameter values, via the same
-// RooJSONFactoryWSTool::exportHisto() helper and "step" type key ROOT's own RooHistFunc exporter
-// uses (JSONFactories_RooFitCore.cxx) -- reimports as an ordinary RooHistFunc. This is honestly
-// lossy (frozen, not tied to the live gamma nuisances) but the object is decorative: nothing in
-// the core likelihood depends on it, so a frozen snapshot is strictly better than the current
-// "aborts the whole import" status quo, and no CMS-specific HS3 type is needed for it.
+// A *declining* exporter does not help here (RooJSONFactoryWSTool::exportObject creates the
+// {"name": ...} stub before it looks up the exporter, and a `false` return clears any partial
+// content but leaves that stub in place) -- so this must actually succeed. There is no way to
+// represent "this process's shape with the propagator's live per-bin correction applied" as a
+// reusable HS3 node without re-deriving the parent histfactory_dist's own staterror gammas per
+// bin, which is exactly the information histfactory_dist already carries once reimported. Instead,
+// export a plain static histogram snapshot at the current (export-time) parameter values, via the
+// same RooJSONFactoryWSTool::exportHisto() helper and "step" type key ROOT's own RooHistFunc
+// exporter uses (JSONFactories_RooFitCore.cxx) -- it reimports as an ordinary RooHistFunc. This is
+// lossy (frozen, not tied to the live gamma nuisances), but the object is decorative: nothing in
+// the likelihood depends on it, a frozen snapshot keeps the export from failing, and no
+// CMS-specific HS3 type is needed for it.
 class CMSHistFuncWrapperStreamer : public RooFit::JSONIO::Exporter {
 public:
    // Don't recurse into func_/err_/x_: they're CMSHistFuncWrapper's *servers* in the RooFit
