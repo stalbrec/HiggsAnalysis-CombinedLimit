@@ -28,6 +28,7 @@
 
 #include "RooFitHS3/RooJSONFactoryWSTool.h"
 #include "RooFitHS3/JSONIO.h"
+#include "CombineHS3Helpers.h"
 #include "../interface/CombineHS3BBLite.h"
 #include "../interface/CombineHS3Channel.h"
 #include <RooWorkspace.h>
@@ -35,6 +36,13 @@
 #include <RooAbsRealLValue.h>
 
 using RooFit::Detail::JSONNode;
+
+using CombineHS3::approxSymmetricKappas;
+using CombineHS3::getOrMakeParameter;
+using CombineHS3::isSingleBinCountingDist;
+using CombineHS3::parse_double;
+using CombineHS3::readDoubleArray;
+using CombineHS3::requirePlainModifierParameter;
 
 // Helper: try to pick a reasonable process name.
 static std::string cms_hist_sum_process_name(const CMSHistSum &hs, unsigned ip)
@@ -131,6 +139,7 @@ void exportOtherFactorModifiers(RooJSONFactoryWSTool* tool, JSONNode& mods, RooA
   }
 }
 
+
 // Shared by tryExportHistFactory (CMSHistSum) and tryExportHistFactoryFromPropagator
 // (CMSHistErrorPropagator): a sample's coefficient is often a RooProduct combining a
 // ProcessNormalization (the lnN / plain-rate part) with one AsymPow per `shape` systematic
@@ -138,21 +147,6 @@ void exportOtherFactorModifiers(RooJSONFactoryWSTool* tool, JSONNode& mods, RooA
 // RooProduct factors instead of requiring the whole coefficient to match one known type: each
 // AsymPow is exactly the normsys it represents, so there is nothing to preserve by serializing
 // the AsymPow node itself.
-// DECISIONS.md 2026-11-11 item 4a: an HS3 histosys/normsys "parameter" is the name of a scalar free
-// parameter (/spec/docs/chapters/2.1.1_fundamental_distributions.md, histfactory_dist). A coefficient
-// that is not a plain RooRealVar (e.g. RooProduct(alpha, c)) has no exact representation there, so
-// the export stops instead of writing the compound node's name. Mirrored in VerticalInterpHistPdf.cc,
-// CMSHistSum.cc and JSONFactories_Combine.cxx.
-static void requirePlainModifierParameter(RooAbsArg const &par, std::string const &pdfName,
-                                          std::string const &sampleName, const char *modType)
-{
-   if (dynamic_cast<RooRealVar const *>(&par)) return;
-   RooJSONFactoryWSTool::error(std::string("HS3 export of pdf '") + pdfName + "', sample '" + sampleName + "': " +
-                               modType + " coefficient '" + par.GetName() + "' is a " + par.ClassName() +
-                               ", not a plain RooRealVar; an HS3 modifier \"parameter\" must be a scalar free "
-                               "parameter (see OPEN_ISSUES.md, scaled normsys/histosys coefficients).");
-}
-
 void exportCoeffModifier(RooJSONFactoryWSTool* tool, JSONNode& mods, RooAbsArg const* c,
                           std::string const& sampleName, std::string const& pdfName) {
   if (!c) {
@@ -997,16 +991,6 @@ STATIC_EXECUTE([]() {
 
 namespace {
 
-/// Helper: read an array of doubles
-static std::vector<double> readDoubleArray(RooFit::Detail::JSONNode const &arr, std::string const &what)
-{
-   std::vector<double> out;
-   out.reserve(arr.num_children());
-   for(const auto& c:arr.children()){
-     out.push_back(c.val_double());
-   }
-   return out;
-}
 
 FastHisto readFastHisto(const JSONNode &n,
 					 const std::string &name,
@@ -1086,90 +1070,6 @@ static RooRealVar &getObservable(RooJSONFactoryWSTool *tool, std::string const &
    return *dynamic_cast<RooRealVar *>(tool->workspace()->arg(obsName.c_str()));
 }
 
-/// Helper: ensure/lookup a parameter (RooRealVar) used by normfactor modifiers
-static RooRealVar &getOrMakeParameter(RooJSONFactoryWSTool *tool, std::string const &parName,
-                                     double init = 1.0, double lo = 0.0, double hi = 10.0)
-{
-   if (auto *arg = tool->workspace()->arg(parName.c_str())) {
-      auto *rrv = dynamic_cast<RooRealVar *>(arg);
-      if (!rrv)
-         throw std::runtime_error("histfactory_dist importer: parameter '" + parName + "' exists but is not RooRealVar");
-      return *rrv;
-   }
-   auto *rrv = new RooRealVar(parName.c_str(), parName.c_str(), init, lo, hi);
-   tool->workspace()->import(*rrv, RooFit::RecycleConflictNodes());
-   return *dynamic_cast<RooRealVar *>(tool->workspace()->arg(parName.c_str()));
-}
-
-bool parse_double(const std::string& input, double& out)
-{
-    const char* begin = input.data();
-    const char* end   = input.data() + input.size();
-
-    double tmp;
-    auto [ptr, ec] = std::from_chars(begin, end, tmp);
-
-    // Successful conversion requires:
-    // 1) No error
-    // 2) Entire string was consumed
-    if((ec == std::errc() && ptr == end)){
-      out = tmp;
-      return true;
-    }
-    return false;
-}
-
-inline bool approxSymmetricKappas(double kLo, double kHi,
-                                 double absLogTol = 1e-10,
-                                 double relLogTol = 1e-10)
-{
-    // kappas must be positive and finite
-    if (!(kLo > 0.0) || !(kHi > 0.0)) return false;
-    if (!std::isfinite(kLo) || !std::isfinite(kHi)) return false;
-
-    const double a = std::log(kLo);
-    const double b = std::log(kHi);
-
-    // symmetric if a ≈ -b  <=>  (a + b) ≈ 0
-    const double diff  = std::abs(a + b);
-    const double scale = std::max(std::abs(a), std::abs(b)); // 0 if both ~1
-    return diff <= std::max(absLogTol, relLogTol * scale);
-}
-
-/// Dispatch predicate, duplicated from JSONFactories_Combine.cxx (and kept in sync with the copy
-/// in VerticalInterpHistPdf.cc): true only for nodes that are unambiguously counting-shaped, i.e. a
-/// single 1-bin axis, one content value per sample and no shape-like modifiers. Those belong to
-/// the single-bin RooPoisson/RooAddition importer, not to this one.
-inline bool isSingleBinCountingDist(RooFit::Detail::JSONNode const &elem)
-{
-    auto const *axes = elem.find("axes");
-    if (!axes || axes->num_children() != 1) return false;
-    for (auto const &ax : axes->children()) {
-        if (ax.has_child("edges")) {
-            if (ax["edges"].num_children() != 2) return false; // two edges == one bin
-        } else {
-            auto const *nb = ax.find("nbins");
-            if (!nb || nb->val_int() != 1) return false;
-            // the count axis n_obs_bin<b> is unbounded above; a 1-bin shape channel is not
-            auto const *mx = ax.find("max");
-            if (mx && !mx->is_null()) return false;
-        }
-    }
-
-    auto const *samples = elem.find("samples");
-    if (!samples || samples->num_children() == 0) return false;
-    for (auto const &s : samples->children()) {
-        auto const *data = s.find("data");
-        if (!data || !data->has_child("contents") || (*data)["contents"].num_children() != 1) return false;
-        if (auto const *mods = s.find("modifiers")) {
-            for (auto const &m : mods->children()) {
-                std::string const mtype = m["type"].val();
-                if (mtype != "normsys" && mtype != "normfactor" && mtype != "custom") return false;
-            }
-        }
-    }
-    return true;
-}
 
 /// A FastHisto on x's binning with these bin contents.
 static FastHisto fastHistoFrom(std::vector<double> const &vals, RooRealVar const &x, std::string const &what)
@@ -1317,7 +1217,7 @@ public:
                      throw std::runtime_error("CMSHistSum importer: shapefactor of '" + sampleName + "' has another name");
                   std::set<std::string> pn;
                   for (auto const &par : m["parameters"].children()) pn.insert(par.val());
-                  auto const vals = readDoubleArray(s["data"]["contents"], sampleName + ".data.contents");
+                  auto const vals = readDoubleArray(s["data"]["contents"]);
                   if (pn.size() != 1 || static_cast<int>(m["parameters"].num_children()) != x->numBins() ||
                       static_cast<int>(vals.size()) != x->numBins() || static_cast<int>(jb) >= x->numBins())
                      throw std::runtime_error("CMSHistSum importer: '" + sampleName + "' is not one parameter in every bin");
@@ -1342,7 +1242,7 @@ public:
                additive = std::make_unique<Additive>();
                additive->sample = sampleName;
                additive->modifier = m["name"].val();
-               additive->scale = readDoubleArray(s["data"]["contents"], sampleName + ".data.contents");
+               additive->scale = readDoubleArray(s["data"]["contents"]);
                if (static_cast<int>(additive->scale.size()) != x->numBins() ||
                    static_cast<int>(m["parameters"].num_children()) != x->numBins())
                   throw std::runtime_error("CMSHistSum importer: shapefactor sample '" + sampleName + "' size != nbins");
@@ -1356,7 +1256,7 @@ public:
          // data.contents (required)
          if (!s.has_child("data") || !s["data"].has_child("contents"))
             throw std::runtime_error("CMSHistSum importer: sample '" + sampleName + "' missing data.contents");
-         std::vector<double> contents = readDoubleArray(s["data"]["contents"], sampleName + ".data.contents");
+         std::vector<double> contents = readDoubleArray(s["data"]["contents"]);
          if (static_cast<int>(contents.size()) != x->numBins())
             throw std::runtime_error("CMSHistSum importer: sample '" + sampleName + "' contents size != nbins");
          // Type-2 bins: the contents (and histosys, below) of bin j are in mcstat_<p>_bin<j>.
@@ -1377,13 +1277,13 @@ public:
          std::vector<std::string> rateMods, histosysNames;
          for (auto const &[j, bb] : type2) {
            std::string const bbName = (*bb)["name"].val();
-           restoreBin(contents, readDoubleArray((*bb)["data"]["contents"], bbName), j, bbName + ".data.contents");
+           restoreBin(contents, readDoubleArray((*bb)["data"]["contents"]), j, bbName + ".data.contents");
          }
 
          // data.errors (optional, but we need it for staterror)
          std::vector<double> errors;
          if (s["data"].has_child("errors")) {
-            errors = readDoubleArray(s["data"]["errors"], sampleName + ".data.errors");
+            errors = readDoubleArray(s["data"]["errors"]);
             if (static_cast<int>(errors.size()) != x->numBins())
                throw std::runtime_error("CMSHistSum importer: sample '" + sampleName + "' errors size != nbins");
          } else {
@@ -1478,16 +1378,16 @@ public:
 		 RooRealVar &p = getOrMakeParameter(tool, parname, 0.0, -10., 10.0);		 
 		 vmorph_pars.add(p);
 		 auto &data = m["data"];
-		 auto lo = readDoubleArray(data["lo"]["contents"], mname);
-		 auto hi = readDoubleArray(data["hi"]["contents"], mname);
+		 auto lo = readDoubleArray(data["lo"]["contents"]);
+		 auto hi = readDoubleArray(data["hi"]["contents"]);
 		 for (auto const &[j, bb] : type2) {
 		   RooFit::Detail::JSONNode const *bbm = nullptr;
 		   for (auto const &mm : (*bb)["modifiers"].children())
 		     if (mm["type"].val() == "histosys" && mm["name"].val() == mname) bbm = &mm;
 		   std::string const what = std::string((*bb)["name"].val()) + " histosys " + mname;
 		   if (!bbm) throw std::runtime_error("CMSHistSum importer: no " + what);
-		   restoreBin(lo, readDoubleArray((*bbm)["data"]["lo"]["contents"], what), j, what + " lo");
-		   restoreBin(hi, readDoubleArray((*bbm)["data"]["hi"]["contents"], what), j, what + " hi");
+		   restoreBin(lo, readDoubleArray((*bbm)["data"]["lo"]["contents"]), j, what + " lo");
+		   restoreBin(hi, readDoubleArray((*bbm)["data"]["hi"]["contents"]), j, what + " hi");
 		 }
 		 histosysNames.push_back(jsonDump(m["name"]) + jsonDump(m["parameter"]));
 		 vmorphs.emplace_back(fastHistoFrom(lo, *x, mname + "Low_" + sampleName),
@@ -1592,7 +1492,7 @@ public:
         auto const *hf = static_cast<CMSHistFunc const *>(funcs.at(ip));
         for (auto const &[j, node] : bb.type3) {
           std::string const bbName = (*node)["name"].val();
-          auto const vals = readDoubleArray((*node)["data"]["contents"], bbName);
+          auto const vals = readDoubleArray((*node)["data"]["contents"]);
           auto const &sf = (*node)["modifiers"].child((*node)["modifiers"].num_children() - 1);
           std::set<std::string> names;
           for (auto const &pn : sf["parameters"].children()) names.insert(pn.val());

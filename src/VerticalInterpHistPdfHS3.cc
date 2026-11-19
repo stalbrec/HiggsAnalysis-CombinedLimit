@@ -18,6 +18,7 @@
 
 #include "RooFitHS3/RooJSONFactoryWSTool.h"
 #include "RooFitHS3/JSONIO.h"
+#include "CombineHS3Helpers.h"
 #include "RooAddPdf.h"
 #include "RooConstVar.h"
 #include "RooRealVar.h"
@@ -34,6 +35,14 @@ using RooFit::Detail::JSONNode;
 
 
 namespace {
+
+using CombineHS3::approxSymmetricKappas;
+using CombineHS3::getOrMakeParameter;
+using CombineHS3::isSingleBinCountingDist;
+using CombineHS3::parse_double;
+using CombineHS3::readDoubleArray;
+using CombineHS3::requirePlainModifierParameter;
+using CombineHS3::writeNormSys;
 
 /// Kept byte-compatible with the copy in JSONFactories_Combine.cxx: the fallback branch must also
 /// write "parameter", because the importer below reads it unconditionally via parse_double().
@@ -74,24 +83,6 @@ void exportOtherFactorModifiers(RooJSONFactoryWSTool* tool, JSONNode& mods, RooA
 }
 
 
-bool parse_double(const std::string& input, double& out)
-{
-    const char* begin = input.data();
-    const char* end   = input.data() + input.size();
-
-    double tmp;
-    auto [ptr, ec] = std::from_chars(begin, end, tmp);
-
-    // Successful conversion requires:
-    // 1) No error
-    // 2) Entire string was consumed
-    if((ec == std::errc() && ptr == end)){
-      out = tmp;
-      return true;
-    }
-    return false;
-}
-
 // Helper: try to pick a reasonable process name.
 static std::string cms_fast_vertinterp_hist_pdf_process_name(const FastVerticalInterpHistPdf2 * pdf, unsigned ip)
 {
@@ -107,21 +98,10 @@ static std::string cms_fast_vertinterp_hist_pdf_process_name(const FastVerticalI
   return "proc_"+std::to_string(ip);
 }
 
-/// Helper: read an array of doubles
-static std::vector<double> readDoubleArray(RooFit::Detail::JSONNode const &arr, std::string const &what)
-{
-   std::vector<double> out;
-   out.reserve(arr.num_children());
-
-   for(const auto& c:arr.children()){
-     out.push_back(c.val_double());
-   }
-   return out;
-}
 
 static std::unique_ptr<TH1D> readTH1D(RooFit::Detail::JSONNode const &arr, RooRealVar x, std::string hname)
 {
-    std::vector<double> contents = readDoubleArray(arr, hname + ".data.contents");
+    std::vector<double> contents = readDoubleArray(arr);
     
     // if (static_cast<int>(contents.size()) != x.numBins()) throw std::runtime_error("Sum of FastVerticalInterpHistPdf2 importer: sample '" + hname + "' contents size != nbins");
     // data.errors can't be used with FastVerticalInterpHistPdf2
@@ -139,69 +119,6 @@ static std::unique_ptr<TH1D> readTH1D(RooFit::Detail::JSONNode const &arr, RooRe
 }
 
 
-
-inline bool isSingleBinCountingDist(RooFit::Detail::JSONNode const &elem)
-{
-    auto const *axes = elem.find("axes");
-    if (!axes || axes->num_children() != 1) return false;
-    for (auto const &ax : axes->children()) {
-        if (ax.has_child("edges")) {
-            if (ax["edges"].num_children() != 2) return false; // two edges == one bin
-        } else {
-            auto const *nb = ax.find("nbins");
-            if (!nb || nb->val_int() != 1) return false;
-            // the count axis n_obs_bin<b> is unbounded above; a 1-bin shape channel is not
-            auto const *mx = ax.find("max");
-            if (mx && !mx->is_null()) return false;
-        }
-    }
-
-    auto const *samples = elem.find("samples");
-    if (!samples || samples->num_children() == 0) return false;
-    for (auto const &s : samples->children()) {
-        auto const *data = s.find("data");
-        if (!data || !data->has_child("contents") || (*data)["contents"].num_children() != 1) return false;
-        if (auto const *mods = s.find("modifiers")) {
-            for (auto const &m : mods->children()) {
-                std::string const mtype = m["type"].val();
-                if (mtype != "normsys" && mtype != "normfactor" && mtype != "custom") return false;
-            }
-        }
-    }
-    return true;
-}
-
-inline bool approxSymmetricKappas(double kLo, double kHi, double absLogTol = 1e-10, double relLogTol = 1e-10) {
-// kappas must be positive and finite
-if (!(kLo > 0.0) || !(kHi > 0.0))
-    return false;
-if (!std::isfinite(kLo) || !std::isfinite(kHi))
-    return false;
-
-const double a = std::log(kLo);
-const double b = std::log(kHi);
-
-// symmetric if a ≈ -b  <=>  (a + b) ≈ 0
-const double diff = std::abs(a + b);
-const double scale = std::max(std::abs(a), std::abs(b));  // 0 if both ~1
-return diff <= std::max(absLogTol, relLogTol * scale);
-}
-
-/// Helper: ensure/lookup a parameter (RooRealVar) used by normfactor modifiers
-static RooRealVar &getOrMakeParameter(RooJSONFactoryWSTool *tool, std::string const &parName,
-                                     double init = 1.0, double lo = 0.0, double hi = 10.0)
-{
-   if (auto *arg = tool->workspace()->arg(parName.c_str())) {
-      auto *rrv = dynamic_cast<RooRealVar *>(arg);
-      if (!rrv)
-         throw std::runtime_error("histfactory_dist importer: parameter '" + parName + "' exists but is not RooRealVar");
-      return *rrv;
-   }
-   auto *rrv = new RooRealVar(parName.c_str(), parName.c_str(), init, lo, hi);
-   tool->workspace()->import(*rrv, RooFit::RecycleConflictNodes());
-   return *dynamic_cast<RooRealVar *>(tool->workspace()->arg(parName.c_str()));
-}
-
 /// Per-export state threaded through the modifier emitters below.
 struct HistFactoryExportCtx {
    RooArgSet observables;                                //!< channel observables, for constraint lookup
@@ -212,58 +129,9 @@ struct HistFactoryExportCtx {
 };
 
 
-// DECISIONS.md 2026-11-11 item 4a: an HS3 histosys/normsys "parameter" is the name of a scalar free
-// parameter (/spec/docs/chapters/2.1.1_fundamental_distributions.md, histfactory_dist). A coefficient
-// that is not a plain RooRealVar (e.g. RooProduct(alpha, c)) has no exact representation there, so
-// the export stops instead of writing the compound node's name. Mirrored in VerticalInterpHistPdf.cc,
-// CMSHistSum.cc and JSONFactories_Combine.cxx.
-static void requirePlainModifierParameter(RooAbsArg const &par, std::string const &pdfName,
-                                          std::string const &sampleName, const char *modType)
-{
-   if (dynamic_cast<RooRealVar const *>(&par)) return;
-   RooJSONFactoryWSTool::error(std::string("HS3 export of pdf '") + pdfName + "', sample '" + sampleName + "': " +
-                               modType + " coefficient '" + par.GetName() + "' is a " + par.ClassName() +
-                               ", not a plain RooRealVar; an HS3 modifier \"parameter\" must be a scalar free "
-                               "parameter (see OPEN_ISSUES.md, scaled normsys/histosys coefficients).");
-}
-
 std::string resolveConstraintPdfName(RooJSONFactoryWSTool *tool, HistFactoryExportCtx &ctx, RooAbsArg const &theta)
 {
-   const std::string thetaName(theta.GetName());
-   auto cached = ctx.constraintCache.find(thetaName);
-   if (cached != ctx.constraintCache.end()) return cached->second;
-
-   RooWorkspace *ws = tool->workspace();
-   RooAbsPdf *constraint = nullptr;
-
-   // Fast path: ShapeTools.py names every constraint pdf "<theta>_Pdf".
-   if (auto *byName = ws->pdf((thetaName + "_Pdf").c_str())) {
-      if (byName->dependsOn(theta)) constraint = byName;
-   }
-
-   // Fallback: the same structural heuristic Combine.cc uses to reattach extraConstraints on JSON
-   // import -- a pdf that depends on theta but on none of the observables.
-   if (!constraint) {
-      for (auto *arg : ws->allPdfs()) {
-         auto *pdf = dynamic_cast<RooAbsPdf *>(arg);
-         if (!pdf || !pdf->dependsOn(theta)) continue;
-         if (pdf->dependsOn(ctx.observables)) continue;
-         constraint = pdf;
-         break;
-      }
-   }
-
-   std::string name;
-   if (constraint) {
-      // Named only if no enclosing product applies it already (CombineHS3Channel.h).
-      if (!ctx.channel || !CombineHS3::constraintAppliedOutside(*ctx.channel, *constraint))
-         name = constraint->GetName();
-      // The referenced name has to exist in the output, and this exporter does not
-      // autoExportDependants.
-      tool->queueExport(*constraint);
-   }
-   ctx.constraintCache[thetaName] = name;
-   return name;
+   return CombineHS3::resolveConstraintPdfName(tool, theta, ctx.observables, ctx.channel, ctx.constraintCache);
 }
 
 
@@ -284,16 +152,7 @@ void exportNormSys(RooJSONFactoryWSTool *tool, HistFactoryExportCtx &ctx, JSONNo
    requirePlainModifierParameter(theta, ctx.channel ? ctx.channel->GetName() : "", ctx.sampleName, "normsys");
    const std::string constraint = resolveConstraintPdfName(tool, ctx, theta);
    registerConstraint(ctx, theta.GetName(), constraint);
-
-   auto &m = mods.append_child().set_map();
-   m["name"] << theta.GetName();
-   m["parameter"] << theta.GetName();
-   m["type"] << "normsys";
-   if (!constraint.empty()) m["constraint"] << constraint;
-   auto &data = m["data"].set_map();
-   data["lo"] << kappaLo;
-   data["hi"] << kappaHi;
-   tool->queueExport(theta);
+   writeNormSys(tool, mods, theta, kappaLo, kappaHi, constraint);
 }
 
 /// The pieces of a RooAddPdf coefficient this exporter knows how to write.
